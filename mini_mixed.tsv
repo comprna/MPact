@@ -1,0 +1,6 @@
+#Chromosome	Position	Reference	Alteration
+chr1	10114	T	C
+chr1	10115	AT	C
+chr1	10116	A	CT
+chr1	badpos	A	G
+chr1	10118	N	G

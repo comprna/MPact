@@ -1,0 +1,71 @@
+#!/bin/bash
+#PBS -P your_project_code
+#PBS -q normal
+#PBS -l walltime=12:00:00
+#PBS -l ncpus=4
+#PBS -l mem=64GB
+#PBS -l storage=gdata/your_project
+#PBS -N mpact_scoring
+#PBS -j oe
+
+set -euo pipefail
+
+# ============================================================================
+# MPact m6A Scoring Pipeline - PBS Job Template
+# ============================================================================
+# 
+# Usage:
+#   1. Edit PBS directives above (project code, queue, resources)
+#   2. Set paths below to your input/output directories and model
+#   3. Submit: qsub submit_mpact_scoring.pbs
+#
+# ============================================================================
+
+cd /path/to/working/directory
+
+# Load required modules
+module load samtools
+source /path/to/venv/bin/activate
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+# Input variants file (.tsv, .vcf, .vcf.gz)
+INPUT_PATH=/path/to/your/input.tsv
+
+# Output directory (will be created if doesn't exist)
+OUTPUT_DIR=/path/to/output/directory
+OUTPUT_TSV=${OUTPUT_DIR}/mpact_predictions.tsv
+OUTPUT_PLOT=${OUTPUT_DIR}/mpact_delta_histogram.png
+
+# Reference genome (must be indexed: samtools faidx hg38.fa)
+FASTA=/path/to/hg38.fa
+
+# MPact model file
+MODEL=/path/to/model_window_501.h5
+
+# Optional: REDIportal A-to-I editing sites for annotation
+# Download from: https://srv00.recas.ba.infn.it/webroot/atlas/
+REDIPORTAL_GZ=/path/to/TABLE1_hg38_v3.txt.gz
+
+# Optional: GTF file for strand inference from transcript IDs
+GTF=/path/to/reference.gtf.gz
+
+# ============================================================================
+# Run MPact Scoring
+# ============================================================================
+
+python score_mpact.py \
+  --input "${INPUT_PATH}" \
+  --output-tsv "${OUTPUT_TSV}" \
+  --fasta "${FASTA}" \
+  --model-path "${MODEL}" \
+  --output-plot "${OUTPUT_PLOT}" \
+  --gtf "${GTF}" \
+  --rediportal-gz "${REDIPORTAL_GZ}" \
+  --scan-radius 5 \
+  --batch-size 512
+
+echo "Done. Results in: ${OUTPUT_DIR}"
+ls -lh "${OUTPUT_DIR}"

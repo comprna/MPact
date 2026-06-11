@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Large reference data kept locally, not in GitHub
+hg38.fa
+hg38.fa.fai
+Homo_sapiens.GRCh38.110.gtf.gz
+TABLE1_hg38_v3.txt.gz
+
+# Runtime outputs
+*.log
+*.out
+*.err
+*.png
+*_results.tsv
+*_predictions.tsv
+sample_predictions.tsv
+smoke_test_results.tsv
+*.checkpoint.json
