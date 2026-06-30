@@ -9,9 +9,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv/bin/python}"
-INPUT_TSV="${INPUT_TSV:-${SCRIPT_DIR}/mini_mixed.tsv}"
+INPUT_TSV="${INPUT_TSV:-${SCRIPT_DIR}/mini_scoreable.tsv}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/example_output}"
-FASTA="${FASTA:-${ROOT_DIR}/ref/hg38.fa}"
+FASTA="${FASTA:-${SCRIPT_DIR}/hg38.fa}"
+GTF="${GTF:-${SCRIPT_DIR}/Homo_sapiens.GRCh38.110.gtf.gz}"
+REDIPORTAL_GZ="${REDIPORTAL_GZ:-${SCRIPT_DIR}/TABLE1_hg38_v3.txt.gz}"
 MODEL="${MODEL:-${SCRIPT_DIR}/model_window_501.h5}"
 OUTPUT_TSV="${OUTPUT_DIR}/sample_predictions.tsv"
 OUTPUT_PLOT="${OUTPUT_DIR}/sample_delta_hist.png"
@@ -37,6 +39,14 @@ if [[ ! -f "${MODEL}" ]]; then
   echo "ERROR: Model file not found: ${MODEL}" >&2
   exit 1
 fi
+if [[ ! -f "${GTF}" ]]; then
+  echo "ERROR: GTF not found: ${GTF}" >&2
+  exit 1
+fi
+if [[ ! -f "${REDIPORTAL_GZ}" ]]; then
+  echo "ERROR: REDIportal A-to-I file not found: ${REDIPORTAL_GZ}" >&2
+  exit 1
+fi
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -46,6 +56,8 @@ echo "Running MPact sample scoring..."
   --output-tsv "${OUTPUT_TSV}" \
   --fasta "${FASTA}" \
   --model-path "${MODEL}" \
+  --gtf "${GTF}" \
+  --rediportal-gz "${REDIPORTAL_GZ}" \
   --output-plot "${OUTPUT_PLOT}" \
   --scan-radius 5 \
   --batch-size 256

@@ -14,6 +14,7 @@ Homo_sapiens.GRCh38.110.gtf.gz
 TABLE1_hg38_v3.txt.gz
 
 # Runtime outputs
+example_output/
 *.log
 *.out
 *.err

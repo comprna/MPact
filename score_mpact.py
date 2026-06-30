@@ -41,17 +41,135 @@ try:
 except ImportError:
     pysam = None
 
-# Ensure local modules can be imported from this directory
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bisect
 
-# Try to import AtoIFilter from local ato_i_filter.py
-try:
-    from ato_i_filter import AtoIFilter
-except ImportError:
-    AtoIFilter = None
+class AtoIFilter:
+    """Index known A-to-I editing sites for fast overlap queries."""
 
+    def __init__(self, rediportal_gz_path):
+        """
+        Load REDIportal hg38 A-to-I sites into memory-indexed structure.
+        
+        Args:
+            rediportal_gz_path: Path to TABLE1_hg38_v3.txt.gz
+        """
+        self.sites_by_chrom = defaultdict(list)
+        self._load(rediportal_gz_path)
+
+    def _load(self, path):
+        """Parse REDIportal and index sites by chromosome."""
+        with gzip.open(path, "rt", errors="replace") as f:
+            header = f.readline().rstrip("\n").split("\t")
+            idx = {c: i for i, c in enumerate(header)}
+            chrom_idx = idx["Region"]
+            pos_idx = idx["Position"]
+            strand_idx = idx["Strand"]
+
+            for line in f:
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) <= max(chrom_idx, pos_idx, strand_idx):
+                    continue
+                chrom = fields[chrom_idx]  # e.g. "chr1"
+                try:
+                    pos = int(fields[pos_idx])
+                except (ValueError, IndexError):
+                    continue
+                strand = fields[strand_idx]
+
+                # Store 1-based position and strand
+                self.sites_by_chrom[chrom].append((pos, strand))
+
+        # Sort and split into parallel position/strand arrays for fast bisect
+        self._pos_by_chrom    = {}   # chrom -> sorted list of int positions
+        self._strand_by_chrom = {}   # chrom -> list of strands (same order)
+        for chrom, entries in self.sites_by_chrom.items():
+            entries.sort()
+            self._pos_by_chrom[chrom]    = [e[0] for e in entries]
+            self._strand_by_chrom[chrom] = [e[1] for e in entries]
+
+    def overlaps_exact(self, chrom, pos, strand=None):
+        """
+        Check if position exactly overlaps a known A-to-I site.
+        Uses binary search — O(log n) instead of O(n).
+        """
+        if chrom not in self._pos_by_chrom:
+            return False
+        positions = self._pos_by_chrom[chrom]
+        strands   = self._strand_by_chrom[chrom]
+        idx = bisect.bisect_left(positions, pos)
+        # check idx and neighbours (same pos may appear on both strands)
+        for i in range(max(0, idx - 1), min(len(positions), idx + 2)):
+            if positions[i] == pos:
+                if strand is None or strands[i] == strand:
+                    return True
+            elif positions[i] > pos:
+                break
+        return False
+
+    def nearest_distance(self, chrom, pos, strand=None):
+        """
+        Find distance to nearest A-to-I site (0 if exact overlap).
+        Uses binary search — O(log n) instead of O(n).
+        """
+        if chrom not in self._pos_by_chrom:
+            return None
+        positions = self._pos_by_chrom[chrom]
+        strands   = self._strand_by_chrom[chrom]
+        if strand is None:
+            # No strand filter: candidates are just the two neighbours of bisect
+            idx = bisect.bisect_left(positions, pos)
+            best = None
+            for i in (idx - 1, idx):
+                if 0 <= i < len(positions):
+                    d = abs(positions[i] - pos)
+                    if best is None or d < best:
+                        best = d
+            return best
+        else:
+            # Strand filter: expand outward from insertion point until distance
+            # exceeds current best (early-exit scan — still O(k) but k is tiny).
+            idx = bisect.bisect_left(positions, pos)
+            best = None
+            # scan right
+            for i in range(idx, len(positions)):
+                d = positions[i] - pos
+                if best is not None and d >= best:
+                    break
+                if strands[i] == strand:
+                    best = d if best is None else min(best, d)
+            # scan left
+            for i in range(idx - 1, -1, -1):
+                d = pos - positions[i]
+                if best is not None and d >= best:
+                    break
+                if strands[i] == strand:
+                    best = d if best is None else min(best, d)
+            return best
+
+    def nearby_sites_within(self, chrom, pos, radius_nt=5, strand=None):
+        """
+        Return A-to-I sites within radius_nt bp.
+        Uses binary search to jump directly to the window — O(log n + k).
+        """
+        if chrom not in self._pos_by_chrom:
+            return []
+        positions = self._pos_by_chrom[chrom]
+        strands   = self._strand_by_chrom[chrom]
+        lo = bisect.bisect_left(positions,  pos - radius_nt)
+        hi = bisect.bisect_right(positions, pos + radius_nt)
+        result = []
+        for i in range(lo, hi):
+            if strand is not None and strands[i] != strand:
+                continue
+            result.append((positions[i], strands[i], abs(positions[i] - pos)))
+        return sorted(result, key=lambda x: x[2])
+
+
+from collections import defaultdict
 
 HALF = 250
+MIN_SCAN_CONTEXT_NT = 5
+MAX_SCAN_CONTEXT_NT = 21
 
 
 CODING_CONSEQUENCES = {
@@ -92,6 +210,15 @@ def reverse_complement(seq):
 
 def complement_base(base):
     return reverse_complement(str(base).upper())
+
+
+def scan_context_half_width(scan_radius):
+    """Return the half-width for the reported ref/alt scan sequence context."""
+    context_nt = (2 * int(scan_radius)) + 1
+    context_nt = max(MIN_SCAN_CONTEXT_NT, min(MAX_SCAN_CONTEXT_NT, context_nt))
+    if context_nt % 2 == 0:
+        context_nt += 1
+    return context_nt // 2
 
 
 def open_text_maybe_gzip(path):
@@ -271,24 +398,34 @@ class FastaFetcher:
         return seq if len(seq) == expected else ""
 
 
-def encode_with_position(seqs, center_index=HALF):
-    """Encode sequences with one-hot + positional embeddings (sin/cos)."""
-    mapping = {
-        "A": [1, 0, 0, 0],
-        "C": [0, 1, 0, 0],
-        "G": [0, 0, 1, 0],
-        "T": [0, 0, 0, 1],
-        "N": [0, 0, 0, 0],
-    }
+def encode_with_position(seqs, center_index=None, window_size=None):
+    """Encode sequences with one-hot + positional embeddings (sin/cos).
+    Fully vectorized with NumPy.
+    """
     n = len(seqs)
-    X = np.zeros((n, 501, 6), dtype=np.float32)
-    for i, seq in enumerate(seqs):
-        for j, nt in enumerate(seq):
-            X[i, j, :4] = mapping.get(nt, [0, 0, 0, 0])
-            rel = j - center_index
-            X[i, j, 4] = np.sin(rel / 10.0)
-            X[i, j, 5] = np.cos(rel / 10.0)
-    return X
+    if window_size is None:
+        L = len(seqs[0]) if seqs else 501
+    else:
+        L = int(window_size)
+    if center_index is None:
+        center_index = L // 2
+    if any(len(seq) != L for seq in seqs):
+        raise ValueError(f"All sequences must be {L} nt for model input")
+    # Build lookup: ord(char) -> 4-element one-hot row
+    _lut = np.zeros((256, 4), dtype=np.float32)
+    _lut[ord('A')] = [1, 0, 0, 0]
+    _lut[ord('C')] = [0, 1, 0, 0]
+    _lut[ord('G')] = [0, 0, 1, 0]
+    _lut[ord('T')] = [0, 0, 0, 1]
+    # Convert all sequences to a uint8 array at once
+    arr = np.frombuffer((''.join(seqs)).encode('ascii'), dtype=np.uint8).reshape(n, L)
+    onehot = _lut[arr]          # shape (n, L, 4)
+    # Pre-compute positional embeddings (same for every sequence)
+    rel   = np.arange(L, dtype=np.float32) - center_index
+    pos_e = np.stack([np.sin(rel / 10.0),
+                      np.cos(rel / 10.0)], axis=-1)   # shape (L, 2)
+    pos_e = np.broadcast_to(pos_e, (n, L, 2))
+    return np.concatenate([onehot, pos_e], axis=-1)    # shape (n, L, 6)
 
 
 def normalize_chrom(c):
@@ -642,13 +779,37 @@ def resolve_required_columns(df):
     return df
 
 
-def flatten_predict_output(pred):
-    """Handle Keras predict outputs across model output styles (ndarray/dict/list)."""
+def split_predict_outputs(pred):
+    """Return class and optional stoichiometry outputs from Keras predict results."""
+    class_pred = None
+    stoich_pred = None
+
     if isinstance(pred, dict):
-        pred = next(iter(pred.values()))
+        if "class_output" in pred:
+            class_pred = np.asarray(pred["class_output"]).reshape(-1)
+        if "stoich_output" in pred:
+            stoich_pred = np.asarray(pred["stoich_output"]).reshape(-1)
+
+        # Fallback for unnamed dict outputs.
+        if class_pred is None and pred:
+            first_key = next(iter(pred.keys()))
+            class_pred = np.asarray(pred[first_key]).reshape(-1)
+            if stoich_pred is None:
+                for key, value in pred.items():
+                    if key != first_key:
+                        stoich_pred = np.asarray(value).reshape(-1)
+                        break
     elif isinstance(pred, (list, tuple)):
-        pred = pred[0]
-    return np.asarray(pred).reshape(-1)
+        if len(pred) > 0:
+            class_pred = np.asarray(pred[0]).reshape(-1)
+        if len(pred) > 1:
+            stoich_pred = np.asarray(pred[1]).reshape(-1)
+    else:
+        class_pred = np.asarray(pred).reshape(-1)
+
+    if class_pred is None:
+        class_pred = np.asarray([]).reshape(-1)
+    return class_pred, stoich_pred
 
 
 def add_delta_stats(df):
@@ -696,18 +857,27 @@ def compute_delta_stats_from_tsv(tsv_path, chunk_size=250000):
     return mu, sd
 
 
-def predict_scores_in_batches(model, seqs, batch_size):
-    """Predict MPact scores for sequence list in bounded-memory batches."""
+def predict_scores_in_batches(model, seqs, batch_size, window_size):
+    """Predict class scores and optional stoich scores in bounded-memory batches."""
     n = len(seqs)
-    out = np.zeros(n, dtype=np.float32)
+    class_out = np.zeros(n, dtype=np.float32)
+    stoich_out = None
     if n == 0:
-        return out
+        return class_out, stoich_out
 
     for i in range(0, n, batch_size):
         j = min(i + batch_size, n)
-        X = encode_with_position(seqs[i:j])
-        out[i:j] = flatten_predict_output(model.predict(X, batch_size=batch_size, verbose=0))
-    return out
+        X = encode_with_position(seqs[i:j], window_size=window_size)
+        pred = model.predict(X, batch_size=batch_size, verbose=0)
+        class_pred, stoich_pred = split_predict_outputs(pred)
+        class_out[i:j] = class_pred
+
+        if stoich_pred is not None:
+            if stoich_out is None:
+                stoich_out = np.zeros(n, dtype=np.float32)
+            stoich_out[i:j] = stoich_pred
+
+    return class_out, stoich_out
 
 
 def z_and_p_from_delta(delta, mu, sd):
@@ -777,6 +947,12 @@ def main():
         help="Path to MPact model (HDF5 format)"
     )
     p.add_argument(
+        "--window-size",
+        type=int,
+        default=501,
+        help="Model input window size in nt (default: 501; use 101 or 201 with matching bundled models)"
+    )
+    p.add_argument(
         "--output-plot",
         default="",
         help="Optional: output PNG histogram of delta scores"
@@ -820,14 +996,14 @@ def main():
     p.add_argument(
         "--batch-size",
         type=int,
-        default=512,
-        help="Batch size for model prediction (default: 512)"
+        default=1024,
+        help="Batch size for model prediction (default: 1024 in optimized version)"
     )
     p.add_argument(
         "--input-chunk-size",
         type=int,
-        default=10000,
-        help="Rows per input chunk for streaming mode (default: 10000)"
+        default=50000,
+        help="Rows per input chunk for streaming mode (default: 50000 in optimized version)"
     )
     p.add_argument(
         "--resume",
@@ -850,6 +1026,14 @@ def main():
         action="store_true",
         help="Keep intermediate <output-tsv>.raw_scored.tsv after successful completion"
     )
+    p.add_argument(
+        "--require-stoich-head",
+        action="store_true",
+        help=(
+            "Fail if the loaded model does not expose a dedicated stoich output head. "
+            "Prevents silent fallback to class_output*100 for stoichiometry columns."
+        ),
+    )
     genic_group = p.add_mutually_exclusive_group()
     genic_group.add_argument(
         "--genic-only",
@@ -865,6 +1049,13 @@ def main():
         help="For VCF input, disable genic-only filtering and keep intergenic variants too",
     )
     args = p.parse_args()
+
+    global HALF
+    window_size = int(args.window_size)
+    if window_size <= 0 or window_size % 2 == 0:
+        raise ValueError("--window-size must be a positive odd integer, e.g. 101, 201, or 501")
+    HALF = window_size // 2
+    print(f"Model window size: {window_size} nt (center index {HALF}; default is 501 nt)")
 
     out_dir = os.path.dirname(args.output_tsv)
     if out_dir:
@@ -898,6 +1089,17 @@ def main():
         custom_objects={"_ReduceSumAxis1": ReduceSumAxis1, "ReduceSumAxis1": ReduceSumAxis1},
     )
     print("Model loaded.")
+
+    model_output_names = list(getattr(model, "output_names", []) or [])
+    has_stoich_head = (len(getattr(model, "outputs", []) or []) > 1) or any(
+        "stoich" in str(name).lower() for name in model_output_names
+    )
+    print(f"Model outputs: {model_output_names if model_output_names else [o.name for o in model.outputs]}")
+    if args.require_stoich_head and not has_stoich_head:
+        raise RuntimeError(
+            "--require-stoich-head was set, but the model has no dedicated stoich output. "
+            f"Model: {args.model_path}; outputs={model_output_names if model_output_names else [o.name for o in model.outputs]}"
+        )
 
     fasta_fetcher = FastaFetcher(args.fasta)
     print(f"FASTA backend: {fasta_fetcher.backend}")
@@ -968,8 +1170,8 @@ def main():
         "mpact_abs_delta",
         "delta_zscore",
         "delta_p_two_sided",
-        "ref10",
-        "alt10",
+        "ref_scan_seq",
+        "alt_scan_seq",
     ]
 
     raw_cols = [c for c in score_cols if c not in {"delta_zscore", "delta_p_two_sided"}]
@@ -978,6 +1180,12 @@ def main():
     strand_col_name = None
     transcript_col_name = None
     scan_radius = int(args.scan_radius)
+    scan_context_half = scan_context_half_width(scan_radius)
+    scan_context_nt = (2 * scan_context_half) + 1
+    print(
+        f"Reported ref/alt scan sequence context: {scan_context_nt} nt "
+        f"(from scan_radius={scan_radius}; min={MIN_SCAN_CONTEXT_NT}, max={MAX_SCAN_CONTEXT_NT})"
+    )
     total_input_rows_seen = 0
     total_input_rows_used = 0
     total_candidates = 0
@@ -1057,6 +1265,7 @@ def main():
             df_in = df_in.drop(columns=[strand_col_name])
 
         df_in["_strand"] = None
+        df_in["_strand_inference"] = None
         if tx_strand_map and transcript_col_name is not None and transcript_col_name in df_in.columns:
             def _strand_from_tx(v):
                 tx = extract_enst_from_sample(v) if transcript_col_name == "Sample" else (None if v is None else str(v))
@@ -1065,12 +1274,14 @@ def main():
                 return tx_strand_map.get(tx) or tx_strand_map.get(tx.split(".")[0])
 
             df_in["_strand"] = df_in[transcript_col_name].map(_strand_from_tx)
+            df_in.loc[df_in["_strand"].notna(), "_strand_inference"] = "transcript"
 
         missing_after_tx = df_in["_strand"].isna()
         if bool(missing_after_tx.any()):
             sub = df_in.loc[missing_after_tx, ["_chrom", "_pos1", "gene_symbols"]].copy()
             gene_symbol_cache = {}
             inferred = []
+            inferred_mode = []
             for chrom, pos1, gene_symbols_raw in sub.itertuples(index=False, name=None):
                 genes = None
                 if args.gtf_interval_use_geneinfo:
@@ -1079,32 +1290,66 @@ def main():
                     if genes is None:
                         genes = parse_gene_symbols_from_geneinfo(key)
                         gene_symbol_cache[key] = genes
-                inferred.append(
-                    infer_strand_from_gtf_intervals(
+
+                # First pass: constrained by GENEINFO if enabled.
+                strand = infer_strand_from_gtf_intervals(
+                    chrom,
+                    int(pos1),
+                    gtf_interval_index,
+                    gene_symbols=genes,
+                    bin_size=gtf_interval_bin_size,
+                )
+                mode = "gtf_geneinfo" if (strand is not None and args.gtf_interval_use_geneinfo) else None
+
+                # Second pass fallback: relaxed interval lookup only when constrained pass fails.
+                if strand is None and args.gtf_interval_use_geneinfo:
+                    strand = infer_strand_from_gtf_intervals(
                         chrom,
                         int(pos1),
                         gtf_interval_index,
-                        gene_symbols=genes,
+                        gene_symbols=None,
                         bin_size=gtf_interval_bin_size,
                     )
-                )
+                    if strand is not None:
+                        mode = "gtf_relaxed"
+
+                if strand is not None and mode is None:
+                    mode = "gtf_relaxed"
+
+                inferred.append(strand)
+                inferred_mode.append(mode)
             df_in.loc[missing_after_tx, "_strand"] = inferred
+            df_in.loc[missing_after_tx, "_strand_inference"] = inferred_mode
 
         records = []
-        for _, row in df_in.iterrows():
-            chrom = row["_chrom"]
-            snp_pos1 = int(row["_pos1"])
-            ref = row["_ref"]
-            alt = row["_alt"]
-            base = {c: row.get(c, "") for c in effective_input_cols}
+        wide_half = scan_radius + HALF
+        expected_len = 2 * wide_half + 1
 
-            wide_half = scan_radius + HALF
+        # Extract columns as arrays — avoids iterrows/itertuples overhead and
+        # the pandas underscore-mangling bug with itertuples.
+        _chroms     = df_in["_chrom"].to_numpy()
+        _pos1s      = df_in["_pos1"].to_numpy(dtype=int)
+        _refs       = df_in["_ref"].to_numpy()
+        _alts       = df_in["_alt"].to_numpy()
+        _strands    = df_in["_strand"].to_numpy() if "_strand" in df_in.columns else [""] * len(df_in)
+        _strand_inf = df_in["_strand_inference"].to_numpy() if "_strand_inference" in df_in.columns else [""] * len(df_in)
+        # base passthrough columns (original user columns preserved as-is)
+        _base_arrays = {c: df_in[c].to_numpy() for c in effective_input_cols if c in df_in.columns}
+
+        for i in range(len(df_in)):
+            chrom      = str(_chroms[i])
+            snp_pos1   = int(_pos1s[i])
+            ref        = str(_refs[i])
+            alt        = str(_alts[i])
+            base       = {c: str(_base_arrays[c][i]) if c in _base_arrays else "" for c in effective_input_cols}
+            strand     = normalize_strand_value(_strands[i])
+            strand_inf = str(_strand_inf[i]) if _strand_inf[i] is not None else ""
+
+            # Fetch once per SNV instead of per-candidate
             wide_seq_plus = fasta_fetcher.fetch(chrom, snp_pos1 - wide_half, snp_pos1 + wide_half)
-            expected = 2 * wide_half + 1
-            if len(wide_seq_plus) != expected:
+            if len(wide_seq_plus) != expected_len:
                 continue
 
-            strand = normalize_strand_value(row.get("_strand", None))
             if strand is None:
                 print(f"WARNING: Could not infer strand for {chrom}:{snp_pos1} {ref}->{alt}; skipping row.")
                 continue
@@ -1112,6 +1357,7 @@ def main():
             ref_oriented = ref if strand == "+" else complement_base(ref)
             alt_oriented = alt if strand == "+" else complement_base(alt)
 
+            # Generate all candidate positions at once
             for delta in range(-scan_radius, scan_radius + 1):
                 a_pos1 = snp_pos1 + delta
                 wide_idx = wide_half + delta
@@ -1123,30 +1369,23 @@ def main():
                 seq_plus_501 = wide_seq_plus[sub_start:sub_end]
                 oriented = seq_plus_501 if strand == "+" else reverse_complement(seq_plus_501)
 
-                if strand == "+":
-                    snp_idx = HALF + (snp_pos1 - a_pos1)
-                    snp_to_a = snp_pos1 - a_pos1
-                else:
-                    snp_idx = HALF + (a_pos1 - snp_pos1)
-                    snp_to_a = a_pos1 - snp_pos1
+                snp_idx = HALF + (snp_pos1 - a_pos1) if strand == "+" else HALF + (a_pos1 - snp_pos1)
+                snp_to_a = snp_pos1 - a_pos1 if strand == "+" else a_pos1 - snp_pos1
 
-                if not (0 <= snp_idx < 501):
+                if not (0 <= snp_idx < window_size):
                     continue
                 if oriented[snp_idx] != ref_oriented:
                     continue
 
-                alt_seq = oriented[:snp_idx] + alt_oriented + oriented[snp_idx + 1 :]
+                alt_seq = oriented[:snp_idx] + alt_oriented + oriented[snp_idx + 1:]
                 ref_center_is_A = oriented[HALF] == "A"
                 alt_center_is_A = alt_seq[HALF] == "A"
                 if not (ref_center_is_A or alt_center_is_A):
                     continue
 
-                if ref_center_is_A and not alt_center_is_A:
-                    score_type = "disruption"
-                elif (not ref_center_is_A) and alt_center_is_A:
-                    score_type = "creation"
-                else:
-                    score_type = "context"
+                score_type = ("disruption" if ref_center_is_A and not alt_center_is_A
+                             else "creation" if (not ref_center_is_A) and alt_center_is_A
+                             else "context")
 
                 overlaps_ato_i_exact = False
                 near_ato_i_5nt = False
@@ -1163,6 +1402,7 @@ def main():
                         **base,
                         "strand_gencode": strand,
                         "strand_gencode_source": _gtf_label,
+                        "strand_gencode_inference": strand_inf,
                         "score_type": score_type,
                         "a_genomic_pos1": a_pos1,
                         "snp_to_a_mRNA_offset": snp_to_a,
@@ -1185,27 +1425,59 @@ def main():
             continue
 
         df = pd.DataFrame(records)
-        ref_scores = predict_scores_in_batches(model, df["ref501"].tolist(), args.batch_size)
+        ref_center_is_a = (df["ref501"].str[HALF] == "A").to_numpy()
+        ref_scores = np.zeros(len(df), dtype=np.float32)
+        ref_stoich_scores = None
+        if ref_center_is_a.any():
+            ref_scores_sub, ref_stoich_sub = predict_scores_in_batches(
+                model,
+                df.loc[ref_center_is_a, "ref501"].tolist(),
+                args.batch_size,
+                window_size,
+            )
+            ref_scores[ref_center_is_a] = ref_scores_sub
+            if ref_stoich_sub is not None:
+                ref_stoich_scores = np.zeros(len(df), dtype=np.float32)
+                ref_stoich_scores[ref_center_is_a] = ref_stoich_sub
+
         alt_center_is_a = (df["alt501"].str[HALF] == "A").to_numpy()
         alt_scores = np.zeros(len(df), dtype=np.float32)
+        alt_stoich_scores = None
         if alt_center_is_a.any():
-            alt_scores_sub = predict_scores_in_batches(
+            alt_scores_sub, alt_stoich_sub = predict_scores_in_batches(
                 model,
                 df.loc[alt_center_is_a, "alt501"].tolist(),
                 args.batch_size,
+                window_size,
             )
             alt_scores[alt_center_is_a] = alt_scores_sub
+            if alt_stoich_sub is not None:
+                alt_stoich_scores = np.zeros(len(df), dtype=np.float32)
+                alt_stoich_scores[alt_center_is_a] = alt_stoich_sub
+
+        stoich_available = ref_stoich_scores is not None or alt_stoich_scores is not None
+        if stoich_available:
+            ref_stoich_for_pct = ref_stoich_scores if ref_stoich_scores is not None else np.zeros(len(df), dtype=np.float32)
+            alt_stoich_for_pct = alt_stoich_scores if alt_stoich_scores is not None else np.zeros(len(df), dtype=np.float32)
+            stoich_source = "stoich_output"
+        else:
+            if chunk_idx == 1:
+                print("WARNING: model has no stoich head; using class_output*100 for stoichiometry columns")
+            ref_stoich_for_pct = ref_scores
+            alt_stoich_for_pct = alt_scores
+            stoich_source = "class_output_scaled_x100"
 
         df["mpact_ref_score"] = ref_scores
         df["mpact_alt_score"] = alt_scores
+        df["mpact_stoich_source"] = stoich_source
         df["alt_center_A_destroyed"] = ~alt_center_is_a
         df["mpact_delta_alt_minus_ref"] = df["mpact_alt_score"] - df["mpact_ref_score"]
         df["mpact_abs_delta"] = df["mpact_delta_alt_minus_ref"].abs()
-        df["mpact_ref_stoichiometry_pct"] = df["mpact_ref_score"] * 100.0
-        df["mpact_alt_stoichiometry_pct"] = df["mpact_alt_score"] * 100.0
-        df["mpact_delta_stoichiometry_pct"] = df["mpact_delta_alt_minus_ref"] * 100.0
-        df["ref10"] = df["ref501"].str[HALF - 5 : HALF + 5]
-        df["alt10"] = df["alt501"].str[HALF - 5 : HALF + 5]
+        df["mpact_ref_stoichiometry_pct"] = ref_stoich_for_pct * 100.0
+        df["mpact_alt_stoichiometry_pct"] = alt_stoich_for_pct * 100.0
+        df["mpact_delta_stoichiometry_pct"] = (alt_stoich_for_pct - ref_stoich_for_pct) * 100.0
+        df["ref_scan_seq"] = df["ref501"].str[HALF - scan_context_half : HALF + scan_context_half + 1]
+        df["alt_scan_seq"] = df["alt501"].str[HALF - scan_context_half : HALF + scan_context_half + 1]
 
         out_part = df[effective_input_cols + raw_cols].copy()
         out_part.to_csv(raw_tmp_path, sep="\t", index=False, mode=write_mode, header=(not wrote_header))
@@ -1222,7 +1494,7 @@ def main():
         )
 
     if not os.path.exists(raw_tmp_path) or os.path.getsize(raw_tmp_path) == 0:
-        cols = (effective_input_cols or []) + ["strand_gencode", "strand_gencode_source"]
+        cols = (effective_input_cols or []) + score_cols
         pd.DataFrame(columns=cols).to_csv(args.output_tsv, sep="\t", index=False)
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)

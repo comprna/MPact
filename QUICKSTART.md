@@ -16,7 +16,8 @@ pip install -r requirements.txt
 ## 2. Bundled paths (all local to this directory)
 
 - Script: score_mpact.py
-- Model: model_window_501.h5
+- Default model: model_window_501.h5 (501 nt window)
+- Alternative trained models: model_window_101.h5 and model_window_201.h5 (use with --window-size 101 or --window-size 201)
 - FASTA: hg38.fa
 - GTF: Homo_sapiens.GRCh38.110.gtf.gz
 
@@ -25,7 +26,7 @@ pip install -r requirements.txt
 ```bash
 cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
 /g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
-  --input mini_mixed.tsv \
+  --input mini_scoreable.tsv \
   --output-tsv sample_predictions.tsv \
   --fasta hg38.fa \
   --model-path model_window_501.h5 \

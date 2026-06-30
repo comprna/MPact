@@ -15,7 +15,7 @@ pip install -r requirements.txt
 
 # Run on bundled sample TSV
 /g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
-  --input mini_mixed.tsv \
+  --input mini_scoreable.tsv \
   --output-tsv smoke_test_results.tsv \
   --fasta hg38.fa \
   --model-path model_window_501.h5 \
@@ -27,12 +27,13 @@ pip install -r requirements.txt
 ## Bundled Paths (All In This Directory)
 
 - Script: `score_mpact.py`
-- Model: `model_window_501.h5`
+- Default model: `model_window_501.h5` (501 nt window)
+- Alternative trained models: `model_window_101.h5` and `model_window_201.h5` (use with `--window-size 101` or `--window-size 201`)
 - FASTA: `hg38.fa`
 - FASTA index: `hg38.fa.fai`
 - GTF: `Homo_sapiens.GRCh38.110.gtf.gz`
 - A-to-I reference: `TABLE1_hg38_v3.txt.gz`
-- Sample input TSV: `mini_mixed.tsv`
+- Sample scoreable TSV: `mini_scoreable.tsv`
 - Sample input VCF: `mini_unannotated_test.vcf`
 
 Required annotation files:
@@ -99,7 +100,7 @@ cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
 ```bash
 cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
 /g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
-  --input mini_mixed.tsv \
+  --input mini_scoreable.tsv \
   --output-tsv sample_predictions.tsv \
   --fasta hg38.fa \
   --model-path model_window_501.h5 \
@@ -114,8 +115,8 @@ From current `score_mpact.py`:
 - **`--gtf` is required** for strand inference and uses `Homo_sapiens.GRCh38.110.gtf.gz` by default.
 - **`--rediportal-gz` is required** for A-to-I annotation and uses `TABLE1_hg38_v3.txt.gz` by default.
 - Default `--scan-radius`: `5`
-- Default `--batch-size`: `512`
-- Default `--input-chunk-size`: `10000`
+- Default `--batch-size`: `1024`
+- Default `--input-chunk-size`: `50000`
 - VCF mode defaults to genic-only filtering (`--genic-only` is on).
 
 ### Resume an interrupted run
@@ -127,7 +128,7 @@ Example:
 
 ```bash
 /g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
-  --input mini_mixed.tsv \
+  --input mini_scoreable.tsv \
   --output-tsv smoke_test_results.tsv \
   --fasta hg38.fa \
   --model-path model_window_501.h5 \
@@ -174,8 +175,8 @@ The output contains:
 | mpact_abs_delta | Absolute effect size: `abs(mpact_delta_alt_minus_ref)`. |
 | delta_zscore | Z-score of raw delta against global delta distribution for the run. |
 | delta_p_two_sided | Two-sided p-value computed from `delta_zscore`. |
-| ref10 | 10-nt centered reference context slice from scored window. |
-| alt10 | 10-nt centered alternate context slice from scored window. |
+| ref_scan_seq | Centered reference context slice from the scored window; length follows `--scan-radius`, capped between 5 and 21 nt. |
+| alt_scan_seq | Centered alternate context slice from the scored window; length follows `--scan-radius`, capped between 5 and 21 nt. |
 
 Note:
 - `delta_zscore` and `delta_p_two_sided` are computed after chunk scoring using global delta mean/std over the temporary scored output.
@@ -230,10 +231,7 @@ Core numeric fields:
 - `mpact_delta_alt_minus_ref`: ALT minus REF (main direction-aware effect size)
 - `mpact_abs_delta`: absolute magnitude of effect
 
-Percent fields are linear transforms of score fields:
-- `mpact_ref_stoichiometry_pct = mpact_ref_score * 100`
-- `mpact_alt_stoichiometry_pct = mpact_alt_score * 100`
-- `mpact_delta_stoichiometry_pct = mpact_delta_alt_minus_ref * 100`
+Stoichiometry percent fields use a dedicated model stoichiometry head when present; otherwise the scorer falls back to class scores scaled by 100.
 
 Direction interpretation for `mpact_delta_alt_minus_ref`:
 - Negative: ALT decreases predicted m6A signal relative to REF
@@ -249,7 +247,7 @@ These are run-level normalized values, so they depend on the cohort/distribution
 
 #### 7) Local context columns
 
-- `ref10` and `alt10` are short centered context strings from the full 501-nt windows.
+- `ref_scan_seq` and `alt_scan_seq` are short centered context strings from the full 501-nt windows.
 - They are useful for quick motif-level sanity checks and visual inspection.
 - They are not a replacement for full-window model inputs, but they are helpful for debugging and reporting.
 
@@ -271,7 +269,7 @@ Optional histogram PNG is written when `--output-plot` is set.
 ```bash
 cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
 /g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
-  --input mini_mixed.tsv \
+  --input mini_scoreable.tsv \
   --output-tsv smoke_test_results.tsv \
   --fasta hg38.fa \
   --model-path model_window_501.h5 \
