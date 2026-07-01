@@ -6,15 +6,16 @@ Standalone pipeline to score SNVs with the MPact model and estimate m6A effect s
 ## Quick Start (Copy-Paste)
 
 ```bash
-cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
+git clone https://github.com/comprna/MPact.git
+cd MPact
 
 # Create env (first time only)
-python -m venv /g/data/qq78/akanksha/m6A-snp/.venv
-source /g/data/qq78/akanksha/m6A-snp/.venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
 # Run on bundled sample TSV
-/g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
+python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv smoke_test_results.tsv \
   --fasta hg38.fa \
@@ -67,8 +68,8 @@ VCF uses standard `CHROM POS ID REF ALT` columns.
 ### 1. Run on your own TSV
 
 ```bash
-cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
-/g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
+cd MPact
+python score_mpact.py \
   --input /path/to/variants.tsv \
   --output-tsv /path/to/predictions.tsv \
   --fasta hg38.fa \
@@ -83,8 +84,8 @@ cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
 ### 2. Run on your own VCF
 
 ```bash
-cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
-/g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
+cd MPact
+python score_mpact.py \
   --input /path/to/variants.vcf.gz \
   --output-tsv /path/to/predictions.tsv \
   --fasta hg38.fa \
@@ -98,8 +99,8 @@ cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
 ### 3. Run on included sample (recommended first check)
 
 ```bash
-cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
-/g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
+cd MPact
+python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv sample_predictions.tsv \
   --fasta hg38.fa \
@@ -127,7 +128,7 @@ You can also set `--resume-from-row` to continue from a specific input row and `
 Example:
 
 ```bash
-/g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
+python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv smoke_test_results.tsv \
   --fasta hg38.fa \
@@ -267,8 +268,8 @@ Optional histogram PNG is written when `--output-plot` is set.
 
 
 ```bash
-cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
-/g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
+cd MPact
+python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv smoke_test_results.tsv \
   --fasta hg38.fa \
@@ -280,7 +281,7 @@ cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
 Observed result:
 - Exit code `0`
 - Output TSV created successfully
-- 5 lines total (header + 4 scored candidates)
+- 6 lines total (header + 5 scored candidates)
 
 ## HPC PBS Usage
 
@@ -299,18 +300,11 @@ qsub submit_mpact_scoring.pbs
 
 ## Resume Note
 
-The run is resumable with the updated PBS wrapper:
+Runs are resumable with `--resume`. Rerun the same command and keep the same `--output-tsv`; the scorer will use the checkpoint and temporary scored TSV to continue interrupted work.
 
 ```bash
-qsub /g/data/qq78/akanksha/m6A-snp/Scripts/run_gnomad_genic_snv_dtm6a501_scan20.pbs
+python score_mpact.py --input mini_scoreable.tsv --output-tsv smoke_test_results.tsv --fasta hg38.fa --model-path model_window_501.h5 --resume
 ```
-
-The wrapper calls `score_mpact.py` with `--resume`, so already-scored chunk outputs in [external_validation/gnomad/chrom_chunks](../external_validation/gnomad/chrom_chunks) are skipped and only missing chunks are processed.
-
-The launcher now passes absolute paths for:
-- FASTA: `MPact_Scoring_Pipeline/hg38.fa`
-- GTF: `MPact_Scoring_Pipeline/Homo_sapiens.GRCh38.110.gtf.gz`
-- REDIportal: `MPact_Scoring_Pipeline/TABLE1_hg38_v3.txt.gz`
 
 ## Troubleshooting
 

@@ -5,11 +5,12 @@ This file is the minimal runbook. Full details are in README.md.
 ## 1. Setup
 
 ```bash
-cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
+git clone https://github.com/comprna/MPact.git
+cd MPact
 
 # First time only
-python -m venv /g/data/qq78/akanksha/m6A-snp/.venv
-source /g/data/qq78/akanksha/m6A-snp/.venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -24,8 +25,8 @@ pip install -r requirements.txt
 ## 3. Run on bundled sample (recommended smoke test)
 
 ```bash
-cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
-/g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
+cd MPact
+python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv sample_predictions.tsv \
   --fasta hg38.fa \
@@ -38,8 +39,8 @@ cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
 ### TSV input
 
 ```bash
-cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
-/g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
+cd MPact
+python score_mpact.py \
   --input /path/to/variants.tsv \
   --output-tsv /path/to/predictions.tsv \
   --fasta hg38.fa \
@@ -50,8 +51,8 @@ cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
 ### VCF input
 
 ```bash
-cd /g/data/qq78/akanksha/m6A-snp/MPact_Scoring_Pipeline
-/g/data/qq78/akanksha/m6A-snp/.venv/bin/python score_mpact.py \
+cd MPact
+python score_mpact.py \
   --input /path/to/variants.vcf.gz \
   --output-tsv /path/to/predictions.tsv \
   --fasta hg38.fa \
