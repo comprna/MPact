@@ -27,7 +27,8 @@ python score_mpact.py \
 
 ## Bundled Paths (All In This Directory)
 
-- Script: `score_mpact.py`
+- Script: `score_mpact.py` for SNV effect scoring
+- Script: `m6A_scorer.py` for direct scoring of known or candidate m6A-centered sites
 - Default model: `model_window_501.h5` (501 nt window)
 - Alternative trained models: `model_window_101.h5` and `model_window_201.h5` (use with `--window-size 101` or `--window-size 201`)
 - FASTA: `hg38.fa`
@@ -35,6 +36,7 @@ python score_mpact.py \
 - GTF: `Homo_sapiens.GRCh38.110.gtf.gz`
 - A-to-I reference: `TABLE1_hg38_v3.txt.gz`
 - Sample scoreable TSV: `mini_scoreable.tsv`
+- Sample m6A-site TSV: `mini_m6A_sites.tsv`
 - Sample input VCF: `mini_unannotated_test.vcf`
 
 Required annotation files:
@@ -96,7 +98,31 @@ python score_mpact.py \
   --batch-size 512
 ```
 
-### 3. Run on included sample (recommended first check)
+### 3. Score known m6A sites directly
+
+Use `m6A_scorer.py` when the input is a table of known or candidate m6A-centered genomic sites, not SNVs. The script fetches a 501 nt reference window around each site, orients the sequence using the strand column, checks that the transcript-oriented center base is `A`, and reports the MPact site score plus optional stoichiometry output.
+
+The input TSV must contain chromosome, 1-based position, and strand columns. Recognized defaults include `chr`, `chrom`, `#Chromosome`, or `CHROM`; `start`, `Position`, `POS`, or `pos`; and `strand` or `Strand`. Use `--chrom-col`, `--pos-col`, and `--strand-col` for other column names. If an `end` column is present, start and end must match.
+
+```bash
+cd MPact
+python m6A_scorer.py \
+  --input mini_m6A_sites.tsv \
+  --output-tsv mini_m6A_sites.scored.tsv \
+  --summary-json mini_m6A_sites.summary.json \
+  --summary-tsv mini_m6A_sites.summary.tsv \
+  --fasta hg38.fa \
+  --model-path model_window_501.h5 \
+  --batch-size 4
+```
+
+Run the bundled smoke test with:
+
+```bash
+bash tests/test_m6A_scorer_smoke.sh
+```
+
+### 4. Run on included variant sample (recommended first check)
 
 ```bash
 cd MPact
