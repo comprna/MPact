@@ -23,7 +23,7 @@ SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from score_mpact import (  # noqa: E402
+from score_mpact import (  
     FastaFetcher,
     ReduceSumAxis1,
     encode_with_position,
