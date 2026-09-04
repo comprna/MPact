@@ -43,7 +43,11 @@ OUTPUT_PLOT=${OUTPUT_DIR}/mpact_delta_histogram.png
 FASTA=/path/to/hg38.fa
 
 # MPact model file
-MODEL=/path/to/model_window_501.h5
+MODEL=/path/to/models/mpact_dtm6a_501nt_seed42.keras
+WINDOW_SIZE=501
+
+# Required conservation track; it must match the FASTA assembly
+CONSERVATION_BIGWIG=/path/to/hg38.phyloP_or_phastCons.bw
 
 # Optional: REDIportal A-to-I editing sites for annotation
 # Download from: https://srv00.recas.ba.infn.it/webroot/atlas/
@@ -58,6 +62,8 @@ GTF=/path/to/reference.gtf.gz
 
 python score_mpact.py \
   --input "${INPUT_PATH}" \
+  --window-size "${WINDOW_SIZE}" \
+  --conservation-bigwig "${CONSERVATION_BIGWIG}" \
   --output-tsv "${OUTPUT_TSV}" \
   --fasta "${FASTA}" \
   --model-path "${MODEL}" \

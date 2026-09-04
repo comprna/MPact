@@ -19,7 +19,9 @@ python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv smoke_test_results.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --rediportal-gz TABLE1_hg38_v3.txt.gz \
   --scan-radius 5 \
   --batch-size 256
@@ -29,11 +31,18 @@ python score_mpact.py \
 
 - Script: `score_mpact.py` for SNV effect scoring
 - Script: `m6A_scorer.py` for direct scoring of known or candidate m6A-centered sites
-- Default model: `model_window_501.h5` (501 nt window)
-- Alternative trained models: `model_window_101.h5` and `model_window_201.h5` (use with `--window-size 101` or `--window-size 201`)
+- Recommended model: `models/mpact_dtm6a_501nt_seed42.keras`
+- Current DTM6A models for every evaluated window:
+  - `models/mpact_dtm6a_101nt_seed42.keras`
+  - `models/mpact_dtm6a_201nt_seed42.keras`
+  - `models/mpact_dtm6a_501nt_seed42.keras`
+  - `models/mpact_dtm6a_801nt_seed42.keras`
+  - `models/mpact_dtm6a_1001nt_seed42.keras`
+- Checkpoint hashes, validation metrics, and thresholds: `models/model_manifest.json`
 - FASTA: `hg38.fa`
 - FASTA index: `hg38.fa.fai`
 - GTF: `Homo_sapiens.GRCh38.110.gtf.gz`
+- A GRCh38 phyloP or phastCons bigWig supplied with `--conservation-bigwig`
 - A-to-I reference: `TABLE1_hg38_v3.txt.gz`
 - Sample scoreable TSV: `mini_scoreable.tsv`
 - Sample m6A-site TSV: `mini_m6A_sites.tsv`
@@ -75,7 +84,9 @@ python score_mpact.py \
   --input /path/to/variants.tsv \
   --output-tsv /path/to/predictions.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --gtf Homo_sapiens.GRCh38.110.gtf.gz \
   --rediportal-gz TABLE1_hg38_v3.txt.gz \
   --output-plot /path/to/delta_histogram.png \
@@ -91,7 +102,9 @@ python score_mpact.py \
   --input /path/to/variants.vcf.gz \
   --output-tsv /path/to/predictions.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --gtf Homo_sapiens.GRCh38.110.gtf.gz \
   --rediportal-gz TABLE1_hg38_v3.txt.gz \
   --scan-radius 5 \
@@ -100,7 +113,7 @@ python score_mpact.py \
 
 ### 3. Score known m6A sites directly
 
-Use `m6A_scorer.py` when the input is a table of known or candidate m6A-centered genomic sites, not SNVs. The script fetches a 501 nt reference window around each site, orients the sequence using the strand column, checks that the transcript-oriented center base is `A`, and reports the MPact site score plus optional stoichiometry output.
+Use `m6A_scorer.py` when the input is a table of known or candidate m6A-centered genomic sites, not SNVs. The script fetches the selected sequence window around each site, orients it using the strand column, checks that the transcript-oriented center base is `A`, and reports the MPact site score, accessibility, and conservation.
 
 The input TSV must contain chromosome, 1-based position, and strand columns. Recognized defaults include `chr`, `chrom`, `#Chromosome`, or `CHROM`; `start`, `Position`, `POS`, or `pos`; and `strand` or `Strand`. Use `--chrom-col`, `--pos-col`, and `--strand-col` for other column names. If an `end` column is present, start and end must match.
 
@@ -112,7 +125,9 @@ python m6A_scorer.py \
   --summary-json mini_m6A_sites.summary.json \
   --summary-tsv mini_m6A_sites.summary.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --batch-size 4
 ```
 
@@ -130,7 +145,9 @@ python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv sample_predictions.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --gtf Homo_sapiens.GRCh38.110.gtf.gz \
   --rediportal-gz TABLE1_hg38_v3.txt.gz \
   --output-plot sample_delta_hist.png
@@ -139,6 +156,8 @@ python score_mpact.py \
 ## Important Runtime Defaults
 
 From current `score_mpact.py`:
+- **`--conservation-bigwig` is required** and must match the reference assembly.
+- Accessibility is always calculated with ViennaRNA RNAplfold.
 - **`--gtf` is required** for strand inference and uses `Homo_sapiens.GRCh38.110.gtf.gz` by default.
 - **`--rediportal-gz` is required** for A-to-I annotation and uses `TABLE1_hg38_v3.txt.gz` by default.
 - Default `--scan-radius`: `5`
@@ -158,7 +177,9 @@ python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv smoke_test_results.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --gtf Homo_sapiens.GRCh38.110.gtf.gz \
   --rediportal-gz TABLE1_hg38_v3.txt.gz \
   --resume
@@ -187,26 +208,32 @@ The output contains:
 | score_type | Candidate class: `disruption`, `creation`, or `context`. |
 | a_genomic_pos1 | 1-based genomic coordinate of the candidate A center that was scored. |
 | snp_to_a_mRNA_offset | Signed offset from SNP to candidate A in oriented transcript coordinates. |
-| ref_center_is_A | Whether reference 501-nt oriented sequence has `A` at center position. |
-| alt_center_is_A | Whether alternate 501-nt oriented sequence has `A` at center position. |
+| ref_center_is_A | Whether the reference-oriented sequence has `A` at its center. |
+| alt_center_is_A | Whether the alternate-oriented sequence has `A` at its center. |
 | overlaps_AtoI_exact | `True` if candidate A exactly overlaps an indexed A-to-I site; otherwise `False`. |
 | near_AtoI_5nt | `True` if nearest A-to-I site is within 5 nt; otherwise `False`. |
 | near_AtoI_10nt | `True` if nearest A-to-I site is within 10 nt; otherwise `False`. |
-| mpact_ref_score | MPact model score on reference-oriented 501-nt sequence. |
-| mpact_alt_score | MPact model score on alternate-oriented 501-nt sequence. |
-| mpact_ref_stoichiometry_pct | Reference score scaled to percent (`mpact_ref_score * 100`). |
-| mpact_alt_stoichiometry_pct | Alternate score scaled to percent (`mpact_alt_score * 100`). |
-| mpact_delta_stoichiometry_pct | Percent delta (`(alt - ref) * 100`). |
+| mpact_ref_score | MPact model score on the reference-oriented sequence. |
+| mpact_alt_score | MPact model score on the alternate-oriented sequence. |
 | alt_center_A_destroyed | `True` when ALT no longer has center A (`not alt_center_is_A`). |
 | mpact_delta_alt_minus_ref | Raw effect size: `mpact_alt_score - mpact_ref_score`. |
 | mpact_abs_delta | Absolute effect size: `abs(mpact_delta_alt_minus_ref)`. |
 | delta_zscore | Z-score of raw delta against global delta distribution for the run. |
 | delta_p_two_sided | Two-sided p-value computed from `delta_zscore`. |
 | ref_scan_seq | Centered reference context slice from the scored window; length follows `--scan-radius`, capped between 5 and 21 nt. |
+| accessibility_source | ViennaRNA RNAplfold parameter label. |
+| mpact_ref/alt/delta_unpaired_probability_1nt | Center-base unpaired probabilities for REF, ALT, and ALT minus REF. |
+| mpact_ref/alt/delta_accessibility_5nt | Centered 5-nt unpaired probabilities for REF, ALT, and their difference. |
+| mpact_ref/alt/delta_accessibility_10nt | Centered 10-nt unpaired probabilities for REF, ALT, and their difference. |
+| mpact_ref/alt/delta_accessibility_20nt | Centered 20-nt unpaired probabilities for REF, ALT, and their difference. |
+| conservation_source | User-supplied phyloP or phastCons track label. |
+| variant_conservation_score | Conservation score at the input variant coordinate. |
+| a_site_conservation_score | Conservation score at the candidate adenosine coordinate. |
 | alt_scan_seq | Centered alternate context slice from the scored window; length follows `--scan-radius`, capped between 5 and 21 nt. |
 
 Note:
 - `delta_zscore` and `delta_p_two_sided` are computed after chunk scoring using global delta mean/std over the temporary scored output.
+- Accessibility and conservation are reported annotations; they are not inputs to the released sequence-only classifiers.
 
 ### Detailed interpretation guide
 
@@ -258,7 +285,7 @@ Core numeric fields:
 - `mpact_delta_alt_minus_ref`: ALT minus REF (main direction-aware effect size)
 - `mpact_abs_delta`: absolute magnitude of effect
 
-Stoichiometry percent fields use a dedicated model stoichiometry head when present; otherwise the scorer falls back to class scores scaled by 100.
+The released models report classification scores and variant deltas only. Stoichiometry is intentionally not predicted because the experimental model did not generalize reliably.
 
 Direction interpretation for `mpact_delta_alt_minus_ref`:
 - Negative: ALT decreases predicted m6A signal relative to REF
@@ -299,7 +326,9 @@ python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv smoke_test_results.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --scan-radius 5 \
   --batch-size 256
 ```
@@ -315,8 +344,8 @@ Template script: `submit_mpact_scoring.pbs`
 
 Before `qsub`, update:
 - `#PBS -P`, queue, walltime, ncpus, mem, storage
-- `INPUT_PATH`, `OUTPUT_DIR`, `FASTA`, `MODEL`
-- optional `REDIPORTAL_GZ`, `GTF`
+- `INPUT_PATH`, `OUTPUT_DIR`, `FASTA`, `MODEL`, `WINDOW_SIZE`, and `CONSERVATION_BIGWIG`
+- `REDIPORTAL_GZ` and `GTF`
 
 Submit with:
 
@@ -329,7 +358,14 @@ qsub submit_mpact_scoring.pbs
 Runs are resumable with `--resume`. Rerun the same command and keep the same `--output-tsv`; the scorer will use the checkpoint and temporary scored TSV to continue interrupted work.
 
 ```bash
-python score_mpact.py --input mini_scoreable.tsv --output-tsv smoke_test_results.tsv --fasta hg38.fa --model-path model_window_501.h5 --resume
+python score_mpact.py \
+  --input mini_scoreable.tsv \
+  --output-tsv smoke_test_results.tsv \
+  --fasta hg38.fa \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
+  --resume
 ```
 
 ## Troubleshooting

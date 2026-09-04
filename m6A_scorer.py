@@ -23,17 +23,22 @@ SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+from annotation_features import (  # noqa: E402
+    ACCESSIBILITY_LENGTHS,
+    AccessibilityCalculator,
+    ConservationTrack,
+)
 from score_mpact import (  # noqa: E402
     FastaFetcher,
     ReduceSumAxis1,
+    class_predictions,
     encode_with_position,
     normalize_chrom,
     reverse_complement,
-    split_predict_outputs,
 )
 
 
-HALF = 250
+SUPPORTED_WINDOW_SIZES = (101, 201, 501, 801, 1001)
 THRESHOLDS = (0.5, 0.7, 0.8, 0.9, 0.95)
 
 
@@ -60,18 +65,14 @@ def empty_summary():
         "score_sum": 0.0,
         "score_min": None,
         "score_max": None,
-        "stoich_sum": 0.0,
-        "stoich_min": None,
-        "stoich_max": None,
     }
     for threshold in THRESHOLDS:
         d[f"score_ge_{threshold:g}"] = 0
     return d
 
 
-def update_score_summary(summary, scores, stoich):
+def update_score_summary(summary, scores):
     scores = np.asarray(scores, dtype=float)
-    stoich = np.asarray(stoich, dtype=float) if stoich is not None else None
     if scores.size == 0:
         return
     summary["n"] += int(scores.size)
@@ -88,21 +89,9 @@ def update_score_summary(summary, scores, stoich):
     )
     for threshold in THRESHOLDS:
         summary[f"score_ge_{threshold:g}"] += int((scores >= threshold).sum())
-    if stoich is not None:
-        summary["stoich_sum"] += float(stoich.sum())
-        summary["stoich_min"] = (
-            float(stoich.min())
-            if summary["stoich_min"] is None
-            else min(summary["stoich_min"], float(stoich.min()))
-        )
-        summary["stoich_max"] = (
-            float(stoich.max())
-            if summary["stoich_max"] is None
-            else max(summary["stoich_max"], float(stoich.max()))
-        )
 
 
-def finalize_summary(summary, score_sample, stoich_sample):
+def finalize_summary(summary, score_sample):
     n = summary["n"]
     out = {"n": n}
     if n == 0:
@@ -123,17 +112,6 @@ def finalize_summary(summary, score_sample, stoich_sample):
         count = summary[f"score_ge_{threshold:g}"]
         out[f"n_score_ge_{threshold:g}"] = count
         out[f"frac_score_ge_{threshold:g}"] = count / n
-    if stoich_sample:
-        out.update(
-            {
-                "stoich_mean_pct": summary["stoich_sum"] / n,
-                "stoich_min_pct": summary["stoich_min"],
-                "stoich_q05_pct": percentile(stoich_sample, 5),
-                "stoich_median_pct": percentile(stoich_sample, 50),
-                "stoich_q95_pct": percentile(stoich_sample, 95),
-                "stoich_max_pct": summary["stoich_max"],
-            }
-        )
     return out
 
 
@@ -157,6 +135,23 @@ def parse_args():
     p.add_argument("--end-col", default=None, help="Optional end column override")
     p.add_argument("--strand-col", default=None, help="Strand column override")
     p.add_argument("--group-col", default=None, help="Optional grouping column for summaries")
+    p.add_argument(
+        "--window-size",
+        type=int,
+        choices=SUPPORTED_WINDOW_SIZES,
+        default=501,
+        help="Input length expected by the selected model (default: 501)",
+    )
+    p.add_argument(
+        "--conservation-bigwig",
+        required=True,
+        help="Required phyloP/phastCons bigWig used to add the site's genomic score",
+    )
+    p.add_argument(
+        "--conservation-label",
+        default=None,
+        help="Output label for --conservation-bigwig (default: bigWig basename)",
+    )
     p.add_argument("--chunksize", type=int, default=100000)
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--max-percentile-sample", type=int, default=500000)
@@ -196,10 +191,14 @@ def resolve_columns(args, columns):
 
 def main():
     args = parse_args()
+    window_size = int(args.window_size)
+    half = window_size // 2
     for path in [args.output_tsv, args.summary_json, args.summary_tsv]:
         out_dir = os.path.dirname(path)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
+    accessibility_calculator = AccessibilityCalculator()
+    conservation_track = ConservationTrack(args.conservation_bigwig, args.conservation_label)
 
     header = pd.read_csv(args.input, sep="\t", dtype=str, nrows=0)
     chrom_col, pos_col, end_col, strand_col, group_col = resolve_columns(args, header.columns)
@@ -207,22 +206,28 @@ def main():
     fetcher = FastaFetcher(args.fasta)
     model = tf.keras.models.load_model(
         args.model_path,
-        custom_objects={"ReduceSumAxis1": ReduceSumAxis1, "_ReduceSumAxis1": ReduceSumAxis1},
+        custom_objects={
+            "ReduceSumAxis1": ReduceSumAxis1,
+            "_ReduceSumAxis1": ReduceSumAxis1,
+            "MPact>ReduceSumAxis1": ReduceSumAxis1,
+        },
         compile=False,
     )
     output_names = list(getattr(model, "output_names", []) or [])
-    has_stoich_head = (len(getattr(model, "outputs", []) or []) > 1) or any(
-        "stoich" in str(name).lower() for name in output_names
-    )
 
     total_rows = 0
     invalid_rows = 0
     non_a_center_rows = 0
+    model_window_size = int(model.input_shape[1])
+    if model_window_size != window_size:
+        raise ValueError(
+            f"--window-size {window_size} does not match model input length "
+            f"{model_window_size}: {args.model_path}"
+        )
     scoreable_rows = 0
     all_summary = empty_summary()
     per_group = defaultdict(empty_summary)
     score_sample = []
-    stoich_sample = []
     seen_sites = {}
 
     first_write = True
@@ -253,13 +258,13 @@ def main():
                 invalid_rows += 1
                 continue
 
-            seq = fetcher.fetch(chrom, pos1 - HALF, pos1 + HALF)
-            if len(seq) != 501 or "N" in seq:
+            seq = fetcher.fetch(chrom, pos1 - half, pos1 + half)
+            if len(seq) != window_size or "N" in seq:
                 invalid_rows += 1
                 continue
 
             oriented = seq if strand == "+" else reverse_complement(seq)
-            center_base = oriented[HALF]
+            center_base = oriented[half]
             scoreable = center_base == "A"
             if not scoreable:
                 non_a_center_rows += 1
@@ -272,10 +277,16 @@ def main():
                     "center_base_transcript": center_base,
                     "scoreable_center_A": scoreable,
                     "mpact_score": np.nan,
-                    "mpact_stoich_source": "",
-                    "mpact_stoichiometry_pct": np.nan,
+                    "accessibility_source": "ViennaRNA_RNAplfold_W200_L150",
+                    "conservation_source": conservation_track.label,
+                    "site_conservation_score": conservation_track.score(chrom, pos1),
                 }
             )
+            rec["mpact_ref_unpaired_probability_1nt"] = np.nan
+            for length in ACCESSIBILITY_LENGTHS:
+                rec[f"mpact_ref_accessibility_{length}nt"] = np.nan
+            for suffix, value in accessibility_calculator.score(oriented).items():
+                rec[f"mpact_ref_{suffix}"] = value
             records.append(rec)
 
             if scoreable:
@@ -283,36 +294,25 @@ def main():
                 row_meta.append(len(records) - 1)
 
         if seqs:
-            encoded = encode_with_position(seqs)
+            encoded = encode_with_position(seqs, window_size=window_size)
             pred = model.predict(encoded, batch_size=args.batch_size, verbose=0)
-            scores, stoich = split_predict_outputs(pred)
-            if stoich is None:
-                stoich = scores * 100.0
-                stoich_source = "class_output_scaled_x100"
-            else:
-                stoich_source = "stoich_output"
-
+            scores = class_predictions(pred)
             scoreable_rows += len(scores)
-            update_score_summary(all_summary, scores, stoich)
+            update_score_summary(all_summary, scores)
             sample_extend(score_sample, scores, args.max_percentile_sample)
-            sample_extend(stoich_sample, stoich, args.max_percentile_sample)
 
-            for local_i, score, stoich_pct in zip(row_meta, scores, stoich):
+            for local_i, score in zip(row_meta, scores):
                 rec = records[local_i]
                 score = float(score)
-                stoich_pct = float(stoich_pct)
                 rec["mpact_score"] = score
-                rec["mpact_stoich_source"] = stoich_source
-                rec["mpact_stoichiometry_pct"] = stoich_pct
 
                 group = rec.get(group_col, "all") if group_col else "all"
-                update_score_summary(per_group[str(group)], [score], [stoich_pct])
+                update_score_summary(per_group[str(group)], [score])
 
                 key = (rec["mpact_chr"], rec["mpact_pos1"], rec["mpact_strand"])
                 previous = seen_sites.get(key)
-                if previous is None or score > previous[0]:
-                    seen_sites[key] = (score, stoich_pct)
-
+                if previous is None or score > previous:
+                    seen_sites[key] = score
         out = pd.DataFrame.from_records(records)
         out.to_csv(
             args.output_tsv,
@@ -327,24 +327,22 @@ def main():
             f"invalid={invalid_rows}; non_A_center={non_a_center_rows}",
             flush=True,
         )
-
     unique_summary = empty_summary()
     if seen_sites:
-        unique_scores = np.asarray([v[0] for v in seen_sites.values()], dtype=float)
-        unique_stoich = np.asarray([v[1] for v in seen_sites.values()], dtype=float)
-        update_score_summary(unique_summary, unique_scores, unique_stoich)
+        unique_scores = np.asarray(list(seen_sites.values()), dtype=float)
+        update_score_summary(unique_summary, unique_scores)
         unique_score_sample = unique_scores[: args.max_percentile_sample].tolist()
-        unique_stoich_sample = unique_stoich[: args.max_percentile_sample].tolist()
     else:
         unique_score_sample = []
-        unique_stoich_sample = []
 
     summary = {
         "input": args.input,
         "output_tsv": args.output_tsv,
         "model_path": args.model_path,
         "model_outputs": output_names,
-        "has_stoich_head": has_stoich_head,
+        "window_size": window_size,
+        "accessibility_source": "ViennaRNA_RNAplfold_W200_L150",
+        "conservation_source": conservation_track.label,
         "columns": {
             "chrom": chrom_col,
             "position": pos_col,
@@ -357,12 +355,12 @@ def main():
         "non_A_center_rows": non_a_center_rows,
         "scoreable_center_A_rows": scoreable_rows,
         "unique_scoreable_sites": len(seen_sites),
-        "all_scoreable_rows": finalize_summary(all_summary, score_sample, stoich_sample),
+        "all_scoreable_rows": finalize_summary(all_summary, score_sample),
         "unique_sites_best_score_per_chr_pos_strand": finalize_summary(
-            unique_summary, unique_score_sample, unique_stoich_sample
+            unique_summary, unique_score_sample
         ),
         "groups": {
-            group: finalize_summary(stats, [], [])
+            group: finalize_summary(stats, [])
             for group, stats in sorted(per_group.items())
         },
     }
@@ -382,6 +380,9 @@ def main():
 
     print(f"Wrote: {args.output_tsv}")
     print(f"Wrote: {args.summary_json}")
+
+    if conservation_track is not None:
+        conservation_track.close()
     print(f"Wrote: {args.summary_tsv}")
 
 

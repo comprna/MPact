@@ -42,6 +42,12 @@ except ImportError:
     pysam = None
 
 import bisect
+from annotation_features import (
+    AccessibilityCalculator,
+    ConservationTrack,
+    annotate_accessibility,
+)
+
 
 class AtoIFilter:
     """Index known A-to-I editing sites for fast overlap queries."""
@@ -170,6 +176,12 @@ from collections import defaultdict
 HALF = 250
 MIN_SCAN_CONTEXT_NT = 5
 MAX_SCAN_CONTEXT_NT = 21
+ACCESSIBILITY_SUFFIXES = (
+    "unpaired_probability_1nt",
+    "accessibility_5nt",
+    "accessibility_10nt",
+    "accessibility_20nt",
+)
 
 
 CODING_CONSEQUENCES = {
@@ -779,37 +791,18 @@ def resolve_required_columns(df):
     return df
 
 
-def split_predict_outputs(pred):
-    """Return class and optional stoichiometry outputs from Keras predict results."""
-    class_pred = None
-    stoich_pred = None
-
+def class_predictions(pred):
+    """Return the classification output from a Keras prediction."""
     if isinstance(pred, dict):
         if "class_output" in pred:
-            class_pred = np.asarray(pred["class_output"]).reshape(-1)
-        if "stoich_output" in pred:
-            stoich_pred = np.asarray(pred["stoich_output"]).reshape(-1)
-
-        # Fallback for unnamed dict outputs.
-        if class_pred is None and pred:
-            first_key = next(iter(pred.keys()))
-            class_pred = np.asarray(pred[first_key]).reshape(-1)
-            if stoich_pred is None:
-                for key, value in pred.items():
-                    if key != first_key:
-                        stoich_pred = np.asarray(value).reshape(-1)
-                        break
+            pred = pred["class_output"]
+        elif pred:
+            pred = next(iter(pred.values()))
+        else:
+            return np.asarray([], dtype=np.float32)
     elif isinstance(pred, (list, tuple)):
-        if len(pred) > 0:
-            class_pred = np.asarray(pred[0]).reshape(-1)
-        if len(pred) > 1:
-            stoich_pred = np.asarray(pred[1]).reshape(-1)
-    else:
-        class_pred = np.asarray(pred).reshape(-1)
-
-    if class_pred is None:
-        class_pred = np.asarray([]).reshape(-1)
-    return class_pred, stoich_pred
+        pred = pred[0] if pred else np.asarray([], dtype=np.float32)
+    return np.asarray(pred).reshape(-1)
 
 
 def add_delta_stats(df):
@@ -858,26 +851,20 @@ def compute_delta_stats_from_tsv(tsv_path, chunk_size=250000):
 
 
 def predict_scores_in_batches(model, seqs, batch_size, window_size):
-    """Predict class scores and optional stoich scores in bounded-memory batches."""
+    """Predict classification scores in bounded-memory batches."""
     n = len(seqs)
     class_out = np.zeros(n, dtype=np.float32)
-    stoich_out = None
     if n == 0:
-        return class_out, stoich_out
+        return class_out
 
     for i in range(0, n, batch_size):
         j = min(i + batch_size, n)
         X = encode_with_position(seqs[i:j], window_size=window_size)
         pred = model.predict(X, batch_size=batch_size, verbose=0)
-        class_pred, stoich_pred = split_predict_outputs(pred)
+        class_pred = class_predictions(pred)
         class_out[i:j] = class_pred
+    return class_out
 
-        if stoich_pred is not None:
-            if stoich_out is None:
-                stoich_out = np.zeros(n, dtype=np.float32)
-            stoich_out[i:j] = stoich_pred
-
-    return class_out, stoich_out
 
 
 def z_and_p_from_delta(delta, mu, sd):
@@ -1027,12 +1014,16 @@ def main():
         help="Keep intermediate <output-tsv>.raw_scored.tsv after successful completion"
     )
     p.add_argument(
-        "--require-stoich-head",
-        action="store_true",
+        "--conservation-bigwig",
+        required=True,
         help=(
-            "Fail if the loaded model does not expose a dedicated stoich output head. "
-            "Prevents silent fallback to class_output*100 for stoichiometry columns."
+            "Required phyloP or phastCons bigWig. Adds scores at the input variant "
+            "and candidate A coordinates."
         ),
+    )
+    p.add_argument(
+        "--conservation-label",
+        help="Optional output label for --conservation-bigwig (default: filename).",
     )
     genic_group = p.add_mutually_exclusive_group()
     genic_group.add_argument(
@@ -1086,23 +1077,29 @@ def main():
     model = tf.keras.models.load_model(
         args.model_path,
         compile=False,
-        custom_objects={"_ReduceSumAxis1": ReduceSumAxis1, "ReduceSumAxis1": ReduceSumAxis1},
+        custom_objects={
+            "_ReduceSumAxis1": ReduceSumAxis1,
+            "ReduceSumAxis1": ReduceSumAxis1,
+            "MPact>ReduceSumAxis1": ReduceSumAxis1,
+        },
     )
     print("Model loaded.")
+    model_window_size = int(model.input_shape[1])
+    if model_window_size != window_size:
+        raise ValueError(
+            f"--window-size {window_size} does not match model input length "
+            f"{model_window_size}: {args.model_path}"
+        )
 
     model_output_names = list(getattr(model, "output_names", []) or [])
-    has_stoich_head = (len(getattr(model, "outputs", []) or []) > 1) or any(
-        "stoich" in str(name).lower() for name in model_output_names
-    )
     print(f"Model outputs: {model_output_names if model_output_names else [o.name for o in model.outputs]}")
-    if args.require_stoich_head and not has_stoich_head:
-        raise RuntimeError(
-            "--require-stoich-head was set, but the model has no dedicated stoich output. "
-            f"Model: {args.model_path}; outputs={model_output_names if model_output_names else [o.name for o in model.outputs]}"
-        )
 
     fasta_fetcher = FastaFetcher(args.fasta)
     print(f"FASTA backend: {fasta_fetcher.backend}")
+    accessibility_calculator = AccessibilityCalculator()
+    conservation_track = ConservationTrack(args.conservation_bigwig, args.conservation_label or None)
+    print("Accessibility output: ViennaRNA RNAplfold (W=200, L=150)")
+    print(f"Conservation output: {conservation_track.label} ({conservation_track.path})")
 
     tx_strand_map = load_transcript_strand_map(args.gtf)
     gtf_interval_bin_size = 1_000_000
@@ -1160,11 +1157,24 @@ def main():
         "overlaps_AtoI_exact",
         "near_AtoI_5nt",
         "near_AtoI_10nt",
+        "accessibility_source",
+        "mpact_ref_unpaired_probability_1nt",
+        "mpact_alt_unpaired_probability_1nt",
+        "mpact_delta_unpaired_probability_1nt",
+        "mpact_ref_accessibility_5nt",
+        "mpact_alt_accessibility_5nt",
+        "mpact_delta_accessibility_5nt",
+        "mpact_ref_accessibility_10nt",
+        "mpact_alt_accessibility_10nt",
+        "mpact_delta_accessibility_10nt",
+        "mpact_ref_accessibility_20nt",
+        "mpact_alt_accessibility_20nt",
+        "mpact_delta_accessibility_20nt",
+        "conservation_source",
+        "variant_conservation_score",
+        "a_site_conservation_score",
         "mpact_ref_score",
         "mpact_alt_score",
-        "mpact_ref_stoichiometry_pct",
-        "mpact_alt_stoichiometry_pct",
-        "mpact_delta_stoichiometry_pct",
         "alt_center_A_destroyed",
         "mpact_delta_alt_minus_ref",
         "mpact_abs_delta",
@@ -1400,6 +1410,8 @@ def main():
                 records.append(
                     {
                         **base,
+                        "_mpact_chrom": chrom,
+                        "_variant_genomic_pos1": snp_pos1,
                         "strand_gencode": strand,
                         "strand_gencode_source": _gtf_label,
                         "strand_gencode_inference": strand_inf,
@@ -1425,57 +1437,59 @@ def main():
             continue
 
         df = pd.DataFrame(records)
+        df["accessibility_source"] = "ViennaRNA_RNAplfold_W200_L150"
+        for suffix in ACCESSIBILITY_SUFFIXES:
+            for allele in ("ref", "alt", "delta"):
+                df[f"mpact_{allele}_{suffix}"] = np.nan
+        if accessibility_calculator is not None:
+            annotate_accessibility(
+                df,
+                accessibility_calculator,
+                ref_column="ref501",
+                alt_column="alt501",
+            )
+
+        df["conservation_source"] = conservation_track.label
+        if conservation_track is not None:
+            df["variant_conservation_score"] = [
+                conservation_track.score(chrom, pos1)
+                for chrom, pos1 in zip(df["_mpact_chrom"], df["_variant_genomic_pos1"])
+            ]
+            df["a_site_conservation_score"] = [
+                conservation_track.score(chrom, pos1)
+                for chrom, pos1 in zip(df["_mpact_chrom"], df["a_genomic_pos1"])
+            ]
+        else:
+            df["variant_conservation_score"] = np.nan
+            df["a_site_conservation_score"] = np.nan
+
         ref_center_is_a = (df["ref501"].str[HALF] == "A").to_numpy()
         ref_scores = np.zeros(len(df), dtype=np.float32)
-        ref_stoich_scores = None
         if ref_center_is_a.any():
-            ref_scores_sub, ref_stoich_sub = predict_scores_in_batches(
+            ref_scores_sub = predict_scores_in_batches(
                 model,
                 df.loc[ref_center_is_a, "ref501"].tolist(),
                 args.batch_size,
                 window_size,
             )
             ref_scores[ref_center_is_a] = ref_scores_sub
-            if ref_stoich_sub is not None:
-                ref_stoich_scores = np.zeros(len(df), dtype=np.float32)
-                ref_stoich_scores[ref_center_is_a] = ref_stoich_sub
 
         alt_center_is_a = (df["alt501"].str[HALF] == "A").to_numpy()
         alt_scores = np.zeros(len(df), dtype=np.float32)
-        alt_stoich_scores = None
         if alt_center_is_a.any():
-            alt_scores_sub, alt_stoich_sub = predict_scores_in_batches(
+            alt_scores_sub = predict_scores_in_batches(
                 model,
                 df.loc[alt_center_is_a, "alt501"].tolist(),
                 args.batch_size,
                 window_size,
             )
             alt_scores[alt_center_is_a] = alt_scores_sub
-            if alt_stoich_sub is not None:
-                alt_stoich_scores = np.zeros(len(df), dtype=np.float32)
-                alt_stoich_scores[alt_center_is_a] = alt_stoich_sub
-
-        stoich_available = ref_stoich_scores is not None or alt_stoich_scores is not None
-        if stoich_available:
-            ref_stoich_for_pct = ref_stoich_scores if ref_stoich_scores is not None else np.zeros(len(df), dtype=np.float32)
-            alt_stoich_for_pct = alt_stoich_scores if alt_stoich_scores is not None else np.zeros(len(df), dtype=np.float32)
-            stoich_source = "stoich_output"
-        else:
-            if chunk_idx == 1:
-                print("WARNING: model has no stoich head; using class_output*100 for stoichiometry columns")
-            ref_stoich_for_pct = ref_scores
-            alt_stoich_for_pct = alt_scores
-            stoich_source = "class_output_scaled_x100"
 
         df["mpact_ref_score"] = ref_scores
         df["mpact_alt_score"] = alt_scores
-        df["mpact_stoich_source"] = stoich_source
         df["alt_center_A_destroyed"] = ~alt_center_is_a
         df["mpact_delta_alt_minus_ref"] = df["mpact_alt_score"] - df["mpact_ref_score"]
         df["mpact_abs_delta"] = df["mpact_delta_alt_minus_ref"].abs()
-        df["mpact_ref_stoichiometry_pct"] = ref_stoich_for_pct * 100.0
-        df["mpact_alt_stoichiometry_pct"] = alt_stoich_for_pct * 100.0
-        df["mpact_delta_stoichiometry_pct"] = (alt_stoich_for_pct - ref_stoich_for_pct) * 100.0
         df["ref_scan_seq"] = df["ref501"].str[HALF - scan_context_half : HALF + scan_context_half + 1]
         df["alt_scan_seq"] = df["alt501"].str[HALF - scan_context_half : HALF + scan_context_half + 1]
 
@@ -1498,6 +1512,8 @@ def main():
         pd.DataFrame(columns=cols).to_csv(args.output_tsv, sep="\t", index=False)
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
+        if conservation_track is not None:
+            conservation_track.close()
         print(f"No scoreable candidates. Wrote empty: {args.output_tsv}")
         return
 
@@ -1538,6 +1554,8 @@ def main():
         os.remove(raw_tmp_path)
     if os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
+    if conservation_track is not None:
+        conservation_track.close()
 
     print(f"\nWrote {total_candidates} scored candidates to: {args.output_tsv}")
     print(f"Delta mean={mu:.6g}, std={sd:.6g}")

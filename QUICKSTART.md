@@ -17,8 +17,12 @@ pip install -r requirements.txt
 ## 2. Bundled paths (all local to this directory)
 
 - Script: score_mpact.py
-- Default model: model_window_501.h5 (501 nt window)
-- Alternative trained models: model_window_101.h5 and model_window_201.h5 (use with --window-size 101 or --window-size 201)
+- Recommended model: models/mpact_dtm6a_501nt_seed42.keras
+- Current models: models/mpact_dtm6a_{101,201,501,801,1001}nt_seed42.keras
+- Model metadata and SHA-256 checksums: models/model_manifest.json
+- Required conservation input: a GRCh38 phyloP or phastCons bigWig
+- Accessibility is always calculated with ViennaRNA RNAplfold
+- The public pipeline does not report stoichiometry predictions
 - FASTA: hg38.fa
 - GTF: Homo_sapiens.GRCh38.110.gtf.gz
 
@@ -30,7 +34,9 @@ python score_mpact.py \
   --input mini_scoreable.tsv \
   --output-tsv sample_predictions.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --output-plot sample_delta_hist.png
 ```
 
@@ -44,7 +50,9 @@ python score_mpact.py \
   --input /path/to/variants.tsv \
   --output-tsv /path/to/predictions.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --output-plot /path/to/delta_histogram.png
 ```
 
@@ -56,7 +64,9 @@ python score_mpact.py \
   --input /path/to/variants.vcf.gz \
   --output-tsv /path/to/predictions.tsv \
   --fasta hg38.fa \
-  --model-path model_window_501.h5 \
+  --model-path models/mpact_dtm6a_501nt_seed42.keras \
+  --window-size 501 \
+  --conservation-bigwig /path/to/hg38.phyloP_or_phastCons.bw \
   --gtf Homo_sapiens.GRCh38.110.gtf.gz
 ```
 
@@ -65,11 +75,12 @@ python score_mpact.py \
 **Required:**
 - `--gtf Homo_sapiens.GRCh38.110.gtf.gz` (or custom) — Strand inference from GTF is mandatory for correctness. Bundled default is recommended.
 
+- `--rediportal-gz /path/to/TABLE1_hg38_v3.txt.gz` — A-to-I annotations are mandatory.
+- `--conservation-bigwig /path/to/track.bw` — The track must use the same assembly as the FASTA.
 **Optional:**
 - Keep intergenic VCF variants: `--allow-nongenic`
 - Smaller memory footprint: `--batch-size 256`
 - Larger neighborhood scan: `--scan-radius 20`
-- Add A-to-I annotation: `--rediportal-gz /path/to/TABLE1_hg38_v3.txt.gz`
 
 ## 6. Input requirements
 

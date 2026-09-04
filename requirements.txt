@@ -1,5 +1,7 @@
-tensorflow>=2.15.0
-numpy>=1.24.0
+tensorflow>=2.15.0,<2.16
+numpy>=1.24.0,<2
 pandas>=2.0.0
 matplotlib>=3.8.0
 pysam>=0.24.0
+ViennaRNA>=2.7.2
+pyBigWig>=0.3.24

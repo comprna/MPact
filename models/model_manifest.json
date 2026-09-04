@@ -1,0 +1,48 @@
+{
+  "architecture": "CNN-BiLSTM-attention (dtm6a)",
+  "data_version": "mpact_rac_glori_allneg_atoi_windowclean_5windows",
+  "task": "binary m6A classification",
+  "model_input": "sequence and positional encoding only",
+  "model_output": "m6A classification score",
+  "required_report_annotations": ["ViennaRNA accessibility", "user-supplied phyloP or phastCons conservation"],
+  "seed": 42,
+  "models": {
+    "101": {
+      "file": "mpact_dtm6a_101nt_seed42.keras",
+      "sha256": "4346cb5e8d21a0332090d8615a70fd542d566c6e71c911983ac6e7d851e42336",
+      "validation_auprc": 0.8424140888312903,
+      "validation_auroc": 0.9694407066789406,
+      "validation_threshold": 0.6851936101913454
+    },
+    "201": {
+      "file": "mpact_dtm6a_201nt_seed42.keras",
+      "sha256": "9df2c5682cbf2ae043bff3ceb4eb0f213a640be75093f6d67e50f1f51b521c8a",
+      "validation_auprc": 0.8939308581628643,
+      "validation_auroc": 0.979719774305818,
+      "validation_threshold": 0.755
+    },
+    "501": {
+      "file": "mpact_dtm6a_501nt_seed42.keras",
+      "sha256": "abdd8c516231a9e81edcb458919df30bedb12178e2e910daa50d501b183b7644",
+      "validation_auprc": 0.9292514842538953,
+      "validation_auroc": 0.985718952702229,
+      "validation_threshold": 0.73
+    },
+    "801": {
+      "file": "mpact_dtm6a_801nt_seed42.keras",
+      "sha256": "d8bba043c3205881ac9b3ac68ffe52eae940b416a3525f126d6ad6e32d74dba7",
+      "validation_auprc": 0.9404879206897984,
+      "validation_auroc": 0.9866253936649704,
+      "validation_threshold": 0.8250000000000001
+    },
+    "1001": {
+      "file": "mpact_dtm6a_1001nt_seed42.keras",
+      "sha256": "d1dc1e83de50af06ec80eee02004397136620d06e00483cbe4cb52a02dc5a3e5",
+      "validation_auprc": 0.9404544209984232,
+      "validation_auroc": 0.9875136061086901,
+      "validation_threshold": 0.755
+    }
+  },
+  "parameter_count_each": 106626,
+  "selection_note": "The 501-nt model is the recommended performance-efficiency compromise."
+}
