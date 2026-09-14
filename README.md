@@ -3,7 +3,7 @@
 Standalone pipeline to score SNVs with the MPact model and estimate m6A effect size.
 
 
-## Quick Start (Copy-Paste)
+## Quick Start 
 
 ```bash
 git clone https://github.com/comprna/MPact.git
@@ -247,8 +247,8 @@ Important behavior:
 
 #### 2) Strand and coordinate columns
 
-- `strand_gencode`: The strand actually used for sequence orientation and scoring. This is the critical strand field to trust for downstream analysis.
-- `strand_gencode_source`: The GTF build label used to infer strand. Useful for reproducibility and cross-run auditing.
+- `strand_gencode`: The strand actually used for sequence orientation and scoring.
+- `strand_gencode_source`: The GTF build label used to infer strand. 
 - `a_genomic_pos1`: Candidate m6A-centered genomic coordinate (1-based).
 - `snp_to_a_mRNA_offset`: SNP-to-center distance in transcript orientation.
 
@@ -285,7 +285,7 @@ Core numeric fields:
 - `mpact_delta_alt_minus_ref`: ALT minus REF (main direction-aware effect size)
 - `mpact_abs_delta`: absolute magnitude of effect
 
-The released models report classification scores and variant deltas only. Stoichiometry is intentionally not predicted because the experimental model did not generalize reliably.
+
 
 Direction interpretation for `mpact_delta_alt_minus_ref`:
 - Negative: ALT decreases predicted m6A signal relative to REF
