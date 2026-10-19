@@ -1,0 +1,3 @@
+# Optional output annotations, not model inputs.
+ViennaRNA>=2.7.2
+pyBigWig>=0.3.24

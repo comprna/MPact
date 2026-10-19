@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import gzip
+import hashlib
 
 import numpy as np
 import pandas as pd
@@ -47,6 +48,7 @@ from annotation_features import (
     ConservationTrack,
     annotate_accessibility,
 )
+from output_columns import bundled_model_path, variant_output_columns
 
 
 class AtoIFilter:
@@ -733,7 +735,7 @@ def load_variants_input(input_path, genic_only=False):
         )
         return df, list(df.columns), "vcf"
 
-    df = pd.read_csv(input_path, sep="\t", dtype=str)
+    df = pd.read_csv(input_path, sep="\t", dtype=str, keep_default_na=False)
     return df, list(df.columns), "tsv"
 
 
@@ -745,7 +747,7 @@ def iter_input_chunks(input_path, genic_only=False, chunk_size=10000):
         yield df, input_cols, input_kind
         return
 
-    for chunk in pd.read_csv(input_path, sep="\t", dtype=str, chunksize=int(chunk_size)):
+    for chunk in pd.read_csv(input_path, sep="\t", dtype=str, keep_default_na=False, chunksize=int(chunk_size)):
         yield chunk, list(chunk.columns), "tsv"
 
 
@@ -930,14 +932,14 @@ def main():
     )
     p.add_argument(
         "--model-path",
-        required=True,
-        help="Path to MPact model (HDF5 format)"
+        default=None,
+        help="Optional Keras checkpoint override; otherwise select the bundled model for --window-size"
     )
     p.add_argument(
         "--window-size",
         type=int,
         default=501,
-        help="Model input window size in nt (default: 501; use 101 or 201 with matching bundled models)"
+        help="Model input length (default: 501); bundled models: 101, 201, 501, 801, 1001"
     )
     p.add_argument(
         "--output-plot",
@@ -1015,9 +1017,9 @@ def main():
     )
     p.add_argument(
         "--conservation-bigwig",
-        required=True,
+        default=None,
         help=(
-            "Required phyloP or phastCons bigWig. Adds scores at the input variant "
+            "Optional phyloP or phastCons bigWig. Adds scores at the input variant "
             "and candidate A coordinates."
         ),
     )
@@ -1025,6 +1027,10 @@ def main():
         "--conservation-label",
         help="Optional output label for --conservation-bigwig (default: filename).",
     )
+    p.add_argument('--accessibility', action='store_true',
+                   help='Opt in to ViennaRNA accessibility annotation (off by default)')
+    p.add_argument('--full-output', action='store_true',
+                   help='Include extra strand/context provenance columns; default is compact')
     genic_group = p.add_mutually_exclusive_group()
     genic_group.add_argument(
         "--genic-only",
@@ -1046,6 +1052,7 @@ def main():
     if window_size <= 0 or window_size % 2 == 0:
         raise ValueError("--window-size must be a positive odd integer, e.g. 101, 201, or 501")
     HALF = window_size // 2
+    args.model_path = bundled_model_path(window_size, args.model_path)
     print(f"Model window size: {window_size} nt (center index {HALF}; default is 501 nt)")
 
     out_dir = os.path.dirname(args.output_tsv)
@@ -1096,10 +1103,11 @@ def main():
 
     fasta_fetcher = FastaFetcher(args.fasta)
     print(f"FASTA backend: {fasta_fetcher.backend}")
-    accessibility_calculator = AccessibilityCalculator()
-    conservation_track = ConservationTrack(args.conservation_bigwig, args.conservation_label or None)
-    print("Accessibility output: ViennaRNA RNAplfold (W=200, L=150)")
-    print(f"Conservation output: {conservation_track.label} ({conservation_track.path})")
+    accessibility_calculator = AccessibilityCalculator() if args.accessibility else None
+    conservation_track = (ConservationTrack(args.conservation_bigwig, args.conservation_label or None)
+                          if args.conservation_bigwig else None)
+    print(f"Accessibility output: {'enabled' if args.accessibility else 'disabled'}")
+    print(f"Conservation output: {conservation_track.path if conservation_track else 'disabled'}")
 
     tx_strand_map = load_transcript_strand_map(args.gtf)
     gtf_interval_bin_size = 1_000_000
@@ -1118,6 +1126,36 @@ def main():
 
     checkpoint_path = args.checkpoint_path or f"{args.output_tsv}.checkpoint.json"
     raw_tmp_path = f"{args.output_tsv}.raw_scored.tsv"
+    run_path = f"{args.output_tsv}.run.json"
+    with open(args.model_path, 'rb') as handle:
+        checkpoint_sha256 = hashlib.sha256(handle.read()).hexdigest()
+    configuration = dict(model_sha256=checkpoint_sha256, window_size=window_size,
+                         input=os.path.abspath(args.input), scan_radius=args.scan_radius,
+                         accessibility=args.accessibility,
+                         conservation_bigwig=os.path.abspath(args.conservation_bigwig) if args.conservation_bigwig else None,
+                         gtf=os.path.abspath(args.gtf), rediportal=os.path.abspath(args.rediportal_gz),
+                         fasta=os.path.abspath(args.fasta),
+                         gtf_interval_features=args.gtf_interval_features,
+                         gtf_interval_use_geneinfo=args.gtf_interval_use_geneinfo,
+                         genic_only=args.genic_only,
+                         resource_signatures={os.path.abspath(p):
+                             dict(bytes=os.stat(p).st_size, mtime_ns=os.stat(p).st_mtime_ns)
+                             for p in [args.input, args.fasta, args.gtf, args.rediportal_gz] +
+                             ([args.conservation_bigwig] if args.conservation_bigwig else [])})
+    if args.resume and os.path.exists(raw_tmp_path) and os.path.getsize(raw_tmp_path):
+        if not os.path.exists(run_path):
+            raise ValueError('Cannot safely resume legacy output without a run manifest; use a new output filename')
+        with open(run_path) as handle:
+            previous_run = json.load(handle)
+        if previous_run['configuration'] != configuration:
+            raise ValueError('Resume settings/checkpoint changed; use the original configuration or a new output filename')
+    with open(run_path, 'w') as handle:
+        json.dump(dict(configuration=configuration, model_path=os.path.abspath(args.model_path),
+                       accessibility_source='ViennaRNA_RNAplfold_W200_L150' if args.accessibility else None,
+                       conservation_source=conservation_track.label if conservation_track else None,
+                       non_A_rule='Non-A-centered alleles receive zero, not a model prediction',
+                       score_meaning='Classification score, not stoichiometry or a calibrated variant-effect p-value'),
+                  handle, indent=2)
     resume_from_row = int(args.resume_from_row or 0)
 
     if args.resume:
@@ -1149,6 +1187,7 @@ def main():
     score_cols = [
         "strand_gencode",
         "strand_gencode_source",
+        "strand_gencode_inference",
         "score_type",
         "a_genomic_pos1",
         "snp_to_a_mRNA_offset",
@@ -1178,10 +1217,9 @@ def main():
         "alt_center_A_destroyed",
         "mpact_delta_alt_minus_ref",
         "mpact_abs_delta",
-        "delta_zscore",
-        "delta_p_two_sided",
         "ref_scan_seq",
         "alt_scan_seq",
+        "ref_motif5", "alt_motif5", "ref_is_DRACH", "alt_is_DRACH", "ref_is_RAC", "alt_is_RAC",
     ]
 
     raw_cols = [c for c in score_cols if c not in {"delta_zscore", "delta_p_two_sided"}]
@@ -1226,9 +1264,8 @@ def main():
         if effective_input_cols is None:
             strand_col_name = next((c for c in ["strand", "Strand"] if c in input_cols), None)
             transcript_col_name = next((c for c in ["transcript_id", "Transcript", "ENST", "Sample"] if c in input_cols), None)
-            effective_input_cols = [
-                "strand_user_provided" if c == strand_col_name else c for c in input_cols
-            ]
+            effective_input_cols = list(dict.fromkeys(list(input_cols) +
+                                                     ['#Chromosome', 'Position', 'Reference', 'Alteration']))
 
             if input_kind == "vcf":
                 n_with_tx = 0
@@ -1272,7 +1309,6 @@ def main():
         # Preserve user strand as metadata only; scoring always uses Gencode strand inference.
         if strand_col_name is not None and strand_col_name in df_in.columns:
             df_in["strand_user_provided"] = df_in[strand_col_name].map(normalize_strand_value)
-            df_in = df_in.drop(columns=[strand_col_name])
 
         df_in["_strand"] = None
         df_in["_strand_inference"] = None
@@ -1437,7 +1473,7 @@ def main():
             continue
 
         df = pd.DataFrame(records)
-        df["accessibility_source"] = "ViennaRNA_RNAplfold_W200_L150"
+        df["accessibility_source"] = "ViennaRNA_RNAplfold_W200_L150" if args.accessibility else ""
         for suffix in ACCESSIBILITY_SUFFIXES:
             for allele in ("ref", "alt", "delta"):
                 df[f"mpact_{allele}_{suffix}"] = np.nan
@@ -1449,7 +1485,7 @@ def main():
                 alt_column="alt501",
             )
 
-        df["conservation_source"] = conservation_track.label
+        df["conservation_source"] = conservation_track.label if conservation_track else ""
         if conservation_track is not None:
             df["variant_conservation_score"] = [
                 conservation_track.score(chrom, pos1)
@@ -1492,6 +1528,11 @@ def main():
         df["mpact_abs_delta"] = df["mpact_delta_alt_minus_ref"].abs()
         df["ref_scan_seq"] = df["ref501"].str[HALF - scan_context_half : HALF + scan_context_half + 1]
         df["alt_scan_seq"] = df["alt501"].str[HALF - scan_context_half : HALF + scan_context_half + 1]
+        for allele in ['ref', 'alt']:
+            motif = df[f'{allele}501'].str[HALF - 2:HALF + 3]
+            df[f'{allele}_motif5'] = motif
+            df[f'{allele}_is_DRACH'] = motif.str.fullmatch('[AGT][AG]AC[ACT]')
+            df[f'{allele}_is_RAC'] = motif.str[1:4].str.fullmatch('[AG]AC')
 
         out_part = df[effective_input_cols + raw_cols].copy()
         out_part.to_csv(raw_tmp_path, sep="\t", index=False, mode=write_mode, header=(not wrote_header))
@@ -1508,7 +1549,14 @@ def main():
         )
 
     if not os.path.exists(raw_tmp_path) or os.path.getsize(raw_tmp_path) == 0:
-        cols = (effective_input_cols or []) + score_cols
+        if effective_input_cols is None:
+            for empty_frame, input_cols, _ in iter_input_chunks(args.input, genic_only=args.genic_only,
+                                                               chunk_size=args.input_chunk_size):
+                effective_input_cols = list(dict.fromkeys(list(input_cols) +
+                    ['#Chromosome', 'Position', 'Reference', 'Alteration']))
+                break
+        cols = variant_output_columns(effective_input_cols or [], args.accessibility,
+                                      bool(conservation_track), args.full_output)
         pd.DataFrame(columns=cols).to_csv(args.output_tsv, sep="\t", index=False)
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
@@ -1522,17 +1570,16 @@ def main():
         f"candidate_records={total_candidates}"
     )
 
-    mu, sd = compute_delta_stats_from_tsv(raw_tmp_path)
-    print(f"Global delta stats from temp output: mean={mu:.6g}, std={sd:.6g}")
-
-    out_cols = (effective_input_cols or []) + score_cols
+    if effective_input_cols is None:
+        prior_columns = pd.read_csv(raw_tmp_path, sep='\t', nrows=0).columns
+        effective_input_cols = [c for c in prior_columns if c not in raw_cols]
+    out_cols = variant_output_columns(effective_input_cols, args.accessibility,
+                                     bool(conservation_track), args.full_output)
     plot_sample = []
     first_chunk = True
-    for part in pd.read_csv(raw_tmp_path, sep="\t", chunksize=250000):
+    for part in pd.read_csv(raw_tmp_path, sep="\t", chunksize=250000,
+                            dtype={c: str for c in effective_input_cols}, keep_default_na=False):
         delta = part["mpact_delta_alt_minus_ref"].astype(float).to_numpy()
-        z, pvals = z_and_p_from_delta(delta, mu, sd)
-        part["delta_zscore"] = z
-        part["delta_p_two_sided"] = pvals
 
         if args.output_plot and len(plot_sample) < 200000:
             room = 200000 - len(plot_sample)
@@ -1558,7 +1605,6 @@ def main():
         conservation_track.close()
 
     print(f"\nWrote {total_candidates} scored candidates to: {args.output_tsv}")
-    print(f"Delta mean={mu:.6g}, std={sd:.6g}")
 
 
 if __name__ == "__main__":

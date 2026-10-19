@@ -1,4 +1,4 @@
-"""Required sequence-accessibility and genomic-conservation annotations."""
+"""Optional sequence-accessibility and genomic-conservation annotations."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class AccessibilityCalculator:
         except ImportError as exc:
             raise ImportError(
                 "Accessibility output requires ViennaRNA. Install dependencies with: "
-                "pip install -r requirements.txt"
+                "pip install -r requirements-annotations.txt"
             ) from exc
         self.RNA = RNA
         self.plfold_window = int(plfold_window)
@@ -61,7 +61,7 @@ class ConservationTrack:
         except ImportError as exc:
             raise ImportError(
                 "Conservation output requires pyBigWig. Install dependencies with: "
-                "pip install -r requirements.txt"
+                "pip install -r requirements-annotations.txt"
             ) from exc
         self.path = os.path.abspath(path)
         self.label = label or os.path.basename(path)

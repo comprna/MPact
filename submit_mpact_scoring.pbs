@@ -46,24 +46,32 @@ FASTA=/path/to/hg38.fa
 MODEL=/path/to/models/mpact_dtm6a_501nt_seed42.keras
 WINDOW_SIZE=501
 
-# Required conservation track; it must match the FASTA assembly
-CONSERVATION_BIGWIG=/path/to/hg38.phyloP_or_phastCons.bw
+# Optional output annotations (disabled by default).
+CONSERVATION_BIGWIG=""
+ACCESSIBILITY=false
 
-# Optional: REDIportal A-to-I editing sites for annotation
+# Required: REDIportal A-to-I editing sites for annotation
 # Download from: https://srv00.recas.ba.infn.it/webroot/atlas/
 REDIPORTAL_GZ=/path/to/TABLE1_hg38_v3.txt.gz
 
-# Optional: GTF file for strand inference from transcript IDs
+# Required: GTF file for strand inference
 GTF=/path/to/reference.gtf.gz
 
 # ============================================================================
 # Run MPact Scoring
 # ============================================================================
 
+ANNOTATION_ARGS=()
+if [[ "$ACCESSIBILITY" == true ]]; then
+  ANNOTATION_ARGS+=(--accessibility)
+fi
+if [[ -n "$CONSERVATION_BIGWIG" ]]; then
+  ANNOTATION_ARGS+=(--conservation-bigwig "$CONSERVATION_BIGWIG")
+fi
+
 python score_mpact.py \
   --input "${INPUT_PATH}" \
   --window-size "${WINDOW_SIZE}" \
-  --conservation-bigwig "${CONSERVATION_BIGWIG}" \
   --output-tsv "${OUTPUT_TSV}" \
   --fasta "${FASTA}" \
   --model-path "${MODEL}" \
@@ -71,7 +79,8 @@ python score_mpact.py \
   --gtf "${GTF}" \
   --rediportal-gz "${REDIPORTAL_GZ}" \
   --scan-radius 5 \
-  --batch-size 512
+  --batch-size 64 \
+  "${ANNOTATION_ARGS[@]}"
 
 echo "Done. Results in: ${OUTPUT_DIR}"
 ls -lh "${OUTPUT_DIR}"

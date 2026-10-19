@@ -10,13 +10,15 @@ orientation.
 
 import argparse
 import json
+import hashlib
+import multiprocessing as mp
 import os
+import re
 import sys
 from collections import defaultdict
 
 import numpy as np
 import pandas as pd
-import tensorflow as tf
 
 
 SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -28,18 +30,23 @@ from annotation_features import (  # noqa: E402
     AccessibilityCalculator,
     ConservationTrack,
 )
-from score_mpact import (  # noqa: E402
-    FastaFetcher,
-    ReduceSumAxis1,
-    class_predictions,
-    encode_with_position,
-    normalize_chrom,
-    reverse_complement,
-)
-
-
+from output_columns import bundled_model_path, site_output_columns
 SUPPORTED_WINDOW_SIZES = (101, 201, 501, 801, 1001)
 THRESHOLDS = (0.5, 0.7, 0.8, 0.9, 0.95)
+
+
+_ACCESSIBILITY_WORKER = None
+
+
+def init_accessibility_worker():
+    """Create one ViennaRNA calculator in each worker process."""
+    global _ACCESSIBILITY_WORKER
+    _ACCESSIBILITY_WORKER = AccessibilityCalculator()
+
+
+def score_accessibility_worker(sequence):
+    """Calculate accessibility in a multiprocessing worker."""
+    return _ACCESSIBILITY_WORKER.score(sequence)
 
 
 def first_present(columns, candidates):
@@ -129,7 +136,7 @@ def parse_args():
     p.add_argument("--summary-json", required=True, help="Summary metrics JSON")
     p.add_argument("--summary-tsv", required=True, help="Summary metrics TSV")
     p.add_argument("--fasta", required=True, help="Reference FASTA")
-    p.add_argument("--model-path", required=True, help="MPact Keras model")
+    p.add_argument("--model-path", default=None, help="Checkpoint override; default: bundled model matching --window-size")
     p.add_argument("--chrom-col", default=None, help="Chromosome column override")
     p.add_argument("--pos-col", default=None, help="1-based site position column override")
     p.add_argument("--end-col", default=None, help="Optional end column override")
@@ -144,8 +151,8 @@ def parse_args():
     )
     p.add_argument(
         "--conservation-bigwig",
-        required=True,
-        help="Required phyloP/phastCons bigWig used to add the site's genomic score",
+        default=None,
+        help="Optional phyloP/phastCons bigWig used to add the site's genomic score",
     )
     p.add_argument(
         "--conservation-label",
@@ -154,6 +161,19 @@ def parse_args():
     )
     p.add_argument("--chunksize", type=int, default=100000)
     p.add_argument("--batch-size", type=int, default=2048)
+    p.add_argument('--accessibility', action='store_true',
+                   help='Opt in to ViennaRNA accessibility annotation (off by default)')
+    p.add_argument('--full-output', action='store_true',
+                   help='Include normalized coordinates and annotation source labels')
+    p.add_argument(
+        "--accessibility-processes",
+        type=int,
+        default=1,
+        help=(
+            "Number of parallel ViennaRNA accessibility workers (default: 1). "
+            "This changes runtime only, not the calculated features."
+        ),
+    )
     p.add_argument("--max-percentile-sample", type=int, default=500000)
     p.add_argument("--max-rows", type=int, default=None, help="Optional smoke-test row limit")
     return p.parse_args()
@@ -192,15 +212,40 @@ def resolve_columns(args, columns):
 def main():
     args = parse_args()
     window_size = int(args.window_size)
+    args.model_path = bundled_model_path(window_size, args.model_path)
+    with open(args.model_path, 'rb') as handle:
+        model_sha256 = hashlib.sha256(handle.read()).hexdigest()
     half = window_size // 2
     for path in [args.output_tsv, args.summary_json, args.summary_tsv]:
         out_dir = os.path.dirname(path)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-    accessibility_calculator = AccessibilityCalculator()
-    conservation_track = ConservationTrack(args.conservation_bigwig, args.conservation_label)
+    if args.accessibility_processes < 1:
+        raise ValueError("--accessibility-processes must be at least 1")
+    accessibility_calculator = (
+        AccessibilityCalculator() if args.accessibility and args.accessibility_processes == 1 else None
+    )
+    accessibility_pool = None
+    if args.accessibility and args.accessibility_processes > 1:
+        accessibility_pool = mp.get_context("spawn").Pool(
+            processes=args.accessibility_processes,
+            initializer=init_accessibility_worker,
+        )
+    import tensorflow as tf
+    from score_mpact import (
+        FastaFetcher,
+        ReduceSumAxis1,
+        class_predictions,
+        encode_with_position,
+        normalize_chrom,
+        reverse_complement,
+    )
+    conservation_track = (ConservationTrack(args.conservation_bigwig, args.conservation_label)
+                          if args.conservation_bigwig else None)
 
     header = pd.read_csv(args.input, sep="\t", dtype=str, nrows=0)
+    output_columns = site_output_columns(list(header.columns), args.accessibility,
+                                         bool(conservation_track), args.full_output)
     chrom_col, pos_col, end_col, strand_col, group_col = resolve_columns(args, header.columns)
 
     fetcher = FastaFetcher(args.fasta)
@@ -231,7 +276,7 @@ def main():
     seen_sites = {}
 
     first_write = True
-    for chunk in pd.read_csv(args.input, sep="\t", dtype=str, chunksize=args.chunksize):
+    for chunk in pd.read_csv(args.input, sep="\t", dtype=str, keep_default_na=False, chunksize=args.chunksize):
         if args.max_rows is not None:
             remaining = int(args.max_rows) - total_rows
             if remaining <= 0:
@@ -242,6 +287,7 @@ def main():
         records = []
         seqs = []
         row_meta = []
+        accessibility_sequences = []
 
         for rowd in chunk.to_dict("records"):
             rec = dict(rowd)
@@ -259,7 +305,7 @@ def main():
                 continue
 
             seq = fetcher.fetch(chrom, pos1 - half, pos1 + half)
-            if len(seq) != window_size or "N" in seq:
+            if len(seq) != window_size or set(seq.upper()) - set('ACGT'):
                 invalid_rows += 1
                 continue
 
@@ -277,21 +323,47 @@ def main():
                     "center_base_transcript": center_base,
                     "scoreable_center_A": scoreable,
                     "mpact_score": np.nan,
-                    "accessibility_source": "ViennaRNA_RNAplfold_W200_L150",
-                    "conservation_source": conservation_track.label,
-                    "site_conservation_score": conservation_track.score(chrom, pos1),
+                    "motif5": oriented[half - 2:half + 3],
+                    "is_DRACH": bool(re.fullmatch('[AGT][AG]AC[ACT]', oriented[half - 2:half + 3])),
+                    "is_RAC": bool(re.fullmatch('[AG]AC', oriented[half - 1:half + 2])),
                 }
             )
-            rec["mpact_ref_unpaired_probability_1nt"] = np.nan
-            for length in ACCESSIBILITY_LENGTHS:
-                rec[f"mpact_ref_accessibility_{length}nt"] = np.nan
-            for suffix, value in accessibility_calculator.score(oriented).items():
-                rec[f"mpact_ref_{suffix}"] = value
+            if conservation_track is not None:
+                rec['conservation_source'] = conservation_track.label
+                rec['site_conservation_score'] = conservation_track.score(chrom, pos1)
+            if args.accessibility:
+                rec['accessibility_source'] = 'ViennaRNA_RNAplfold_W200_L150'
+                rec["mpact_ref_unpaired_probability_1nt"] = np.nan
+                for length in ACCESSIBILITY_LENGTHS:
+                    rec[f"mpact_ref_accessibility_{length}nt"] = np.nan
             records.append(rec)
+            if args.accessibility:
+                accessibility_sequences.append(oriented)
 
             if scoreable:
                 seqs.append(oriented)
                 row_meta.append(len(records) - 1)
+
+        if accessibility_sequences:
+            if accessibility_pool is None:
+                accessibility_values = [
+                    accessibility_calculator.score(sequence)
+                    for sequence in accessibility_sequences
+                ]
+            else:
+                worker_chunksize = max(
+                    1,
+                    len(accessibility_sequences)
+                    // (args.accessibility_processes * 16),
+                )
+                accessibility_values = accessibility_pool.map(
+                    score_accessibility_worker,
+                    accessibility_sequences,
+                    chunksize=worker_chunksize,
+                )
+            for rec, values in zip(records, accessibility_values):
+                for suffix, value in values.items():
+                    rec[f"mpact_ref_{suffix}"] = value
 
         if seqs:
             encoded = encode_with_position(seqs, window_size=window_size)
@@ -313,7 +385,7 @@ def main():
                 previous = seen_sites.get(key)
                 if previous is None or score > previous:
                     seen_sites[key] = score
-        out = pd.DataFrame.from_records(records)
+        out = pd.DataFrame.from_records(records).reindex(columns=output_columns)
         out.to_csv(
             args.output_tsv,
             sep="\t",
@@ -339,10 +411,11 @@ def main():
         "input": args.input,
         "output_tsv": args.output_tsv,
         "model_path": args.model_path,
+        "model_sha256": model_sha256,
         "model_outputs": output_names,
         "window_size": window_size,
-        "accessibility_source": "ViennaRNA_RNAplfold_W200_L150",
-        "conservation_source": conservation_track.label,
+        "accessibility_source": "ViennaRNA_RNAplfold_W200_L150" if args.accessibility else None,
+        "conservation_source": conservation_track.label if conservation_track else None,
         "columns": {
             "chrom": chrom_col,
             "position": pos_col,
@@ -364,6 +437,8 @@ def main():
             for group, stats in sorted(per_group.items())
         },
     }
+    if first_write:
+        pd.DataFrame(columns=output_columns).to_csv(args.output_tsv, sep='\t', index=False)
 
     with open(args.summary_json, "w") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
@@ -383,6 +458,9 @@ def main():
 
     if conservation_track is not None:
         conservation_track.close()
+    if accessibility_pool is not None:
+        accessibility_pool.close()
+        accessibility_pool.join()
     print(f"Wrote: {args.summary_tsv}")
 
 

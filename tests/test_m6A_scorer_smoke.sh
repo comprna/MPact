@@ -37,6 +37,7 @@ PY
   --model-path models/mpact_dtm6a_501nt_seed42.keras \
   --window-size 501 \
   --conservation-bigwig "$conservation_bw" \
+  --accessibility \
   --batch-size 4
 
 "$python_bin" - "$outdir/mini_m6A_sites.summary.json" "$outdir/mini_m6A_sites.scored.tsv" <<'PY'
