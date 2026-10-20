@@ -27,26 +27,16 @@ as needed. Models expect TensorFlow 2.15; CPU inference is supported.
 
 ## Models
 
-The current checkpoints are from `mpact_IVTscreen_architecture_5windows_20261015`,
-seed 42. They replace the September release. **501 nt is the default**.
-`--window-size` automatically selects the matching bundled checkpoint;
-`--model-path` is optional and overrides that selection. Custom checkpoints must
-match the requested input length. Checkpoints retain the original mixed-float16
-policy. CPU inference can differ numerically from GPU inference, particularly
-for longer windows; use a GPU for strict reproduction of saved GPU scores.
+The current Models are:
 
-| Window | Bundled checkpoint | Validation AUPRC | Validation AUROC |
-|---|---|---:|---:|
-| 101 | `models/mpact_dtm6a_101nt_seed42.keras` | 0.9947 | 0.9962 |
-| 201 | `models/mpact_dtm6a_201nt_seed42.keras` | 0.9966 | 0.9975 |
-| **501 (default)** | `models/mpact_dtm6a_501nt_seed42.keras` | 0.9975 | 0.9980 |
-| 801 | `models/mpact_dtm6a_801nt_seed42.keras` | 0.9979 | 0.9983 |
-| 1001 | `models/mpact_dtm6a_1001nt_seed42.keras` | 0.9983 | 0.9986 |
+| Window | Validation AUPRC | Validation AUROC |
+|---|---:|---:|
+| 101 | 0.9947 | 0.9962 |
+| 201 | 0.9966 | 0.9975 |
+| **501 (default)** | 0.9975 | 0.9980 |
+| 801 | 0.9979 | 0.9983 |
+| 1001 | 0.9983 | 0.9986 |
 
-Hashes, validation counts, weighting and validation-MCC cutoffs are recorded in
-`models/model_manifest.json`. These are internal-validation results, not
-external or genome-wide precision estimates. No held-out benchmark data were
-used for checkpoint selection; models were not refitted on all splits.
 
 ## Score SNVs
 
@@ -130,15 +120,9 @@ Input columns come first. The variant scorer adds:
 The site scorer adds `mpact_score`, `center_base_transcript`,
 `scoreable_center_A`, `motif5`, `is_DRACH` and `is_RAC`.
 
-Neither scorer generates score-threshold gain/loss classes, cutoff columns,
-stoichiometry, delta z-scores, cohort-derived p-values or repeated non-A notes.
-`score_type` describes the nucleotide event, not a score-threshold class.
-Scores/deltas do not change when output is simplified.
 
-For variants, a non-A-centered allele receives zero because that base cannot
-carry m6A; this is not a neural-network prediction. Retain central-base flags
-when interpreting effects. Direct site scoring instead reports a missing
-score for non-A centers.
+`score_type` describes the nucleotide event.
+
 
 Optional annotation columns appear only when enabled:
 
@@ -150,20 +134,15 @@ Optional annotation columns appear only when enabled:
   `a_site_conservation_score`; site scoring adds `site_conservation_score`.
   Missing track coverage remains missing, not zero. The track must match the
   reference assembly. `--conservation-label` sets a provenance label.
-- `--full-output` adds strand/context and enabled annotation-source provenance.
-  It does not enable annotations or reinstate threshold classes or p-values.
+- `--full-output` adds strand/context.
+  
 
-Classification scores do not establish experimentally significant m6A changes
-or clinical pathogenicity. Validation thresholds are not guaranteed
-genome-wide precision cutoffs; scores are not stoichiometry estimates.
 
 ## Resume and provenance
 
 Rerun interrupted variant commands with `--resume`, the same output filename
 and settings. Retain `.raw_scored.tsv`, `.checkpoint.json` and `.run.json`
-sidecars. The run manifest records checkpoint SHA-256, settings and annotation
-provenance. Resuming with a different checkpoint/settings is rejected.
-Legacy temporary files without this manifest must use a new output filename.
+sidecars. 
 `--keep-raw-temp` retains the raw TSV after successful completion.
 `--output-plot plot.png` adds a delta histogram.
 
